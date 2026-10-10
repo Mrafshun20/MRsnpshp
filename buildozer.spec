@@ -3,8 +3,9 @@ title = SnappShop
 package.name = snappshop
 package.domain = org.vendor
 source.dir = .
-source.include_exts = py,ttf
+source.include_exts = py,ttf,png
 version = 2.1.2
+icon.filename = %(source.dir)s/icon.png
 requirements = python3==3.11.5,hostpython3==3.11.5,kivy==2.3.0,requests,urllib3,idna,charset-normalizer,certifi,arabic-reshaper,python-bidi==0.4.2,future
 orientation = portrait
 fullscreen = 0
