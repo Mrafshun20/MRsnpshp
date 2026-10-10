@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
-import json, os, threading
+import json, os, re, threading, time
 from typing import Any, Dict, List, Optional
 
 import requests
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.text import LabelBase
-from kivy.metrics import dp
+from kivy.core.window import Window
+from kivy.graphics import Color, RoundedRectangle
+from kivy.metrics import dp, sp
+from kivy.uix.behaviors import ButtonBehavior, ToggleButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
+from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.uix.textinput import TextInput
 
 import arabic_reshaper
@@ -21,25 +23,34 @@ try:
 except ImportError:
     from bidi import get_display
 
-import time
+# ---------------- theme ----------------
+BG = (0.055, 0.07, 0.11, 1)
+BAR = (0.09, 0.11, 0.17, 1)
+CARD = (0.105, 0.13, 0.20, 1)
+FIELD = (0.06, 0.08, 0.13, 1)
+ACC = (0.23, 0.51, 0.96, 1)
+ACC2 = (0.20, 0.25, 0.36, 1)
+GRN = (0.30, 0.85, 0.50, 1)
+RED = (0.97, 0.40, 0.40, 1)
+TXT = (0.90, 0.92, 0.96, 1)
+MUT = (0.55, 0.60, 0.70, 1)
 
-# ---------- Persian font / shaping ----------
-FONT = "Roboto"
-for p in ("/system/fonts/NotoNaskhArabic-Regular.ttf",
-          "/system/fonts/NotoSansArabic-Regular.ttf",
-          "/system/fonts/DroidNaskh-Regular.ttf",
-          os.path.join(os.path.dirname(__file__), "Vazirmatn.ttf")):
-    if os.path.exists(p):
-        LabelBase.register(name="fa", fn_regular=p)
-        FONT = "fa"
-        break
+HERE = os.path.dirname(os.path.abspath(__file__))
+LabelBase.register(name="fa",
+                   fn_regular=os.path.join(HERE, "DejaVuSans.ttf"),
+                   fn_bold=os.path.join(HERE, "DejaVuSans-Bold.ttf"))
+FONT = FONT_B = "fa"
+Window.clearcolor = BG
+Window.softinput_mode = "below_target"
+
+_RTL = re.compile("[\u0600-\u06FF]")
 
 
 def fa(text: str) -> str:
     return "\n".join(get_display(arabic_reshaper.reshape(l)) for l in str(text).split("\n"))
 
 
-# ---------- API ----------
+# ---------------- API ----------------
 class SnappShopAutomationAPI:
     BASE_URL = "https://apix.snappshop.ir/automation/v1"
 
@@ -105,34 +116,110 @@ class SnappShopAutomationAPI:
         return self._request("GET", f"vendors/{vid}/orders", params=p)
 
 
-# ---------- UI ----------
-def field(hint="", text="", **kw):
-    return TextInput(hint_text=hint, text=text, multiline=False, size_hint_y=None,
-                     height=dp(44), write_tab=False, **kw)
+# ---------------- widgets ----------------
+class Bg(BoxLayout):
+    def __init__(self, color=CARD, radius=0, **kw):
+        super().__init__(**kw)
+        with self.canvas.before:
+            Color(*color)
+            self._r = RoundedRectangle(radius=[dp(radius)])
+        self.bind(pos=self._u, size=self._u)
+
+    def _u(self, *_):
+        self._r.pos, self._r.size = self.pos, self.size
 
 
-def btn(text, cb):
-    b = Button(text=fa(text), font_name=FONT, size_hint_y=None, height=dp(46))
-    b.bind(on_release=lambda *_: cb())
-    return b
+def lab(text, color=TXT, size=14, bold=False, halign="right"):
+    l = Label(text=fa(text), font_name=FONT_B if bold else FONT, font_size=sp(size),
+              color=color, halign=halign, valign="middle", size_hint_y=None)
+    l.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
+    l.bind(texture_size=lambda i, s: setattr(i, "height", max(s[1], dp(18)) + dp(4)))
+    return l
 
 
-def lbl(text):
-    return Label(text=fa(text), font_name=FONT, size_hint_y=None, height=dp(28), halign="right")
+def inp(hint, text="", **kw):
+    return TextInput(hint_text=hint, text=text, multiline=False, font_name=FONT, font_size=sp(16),
+                     size_hint_y=None, height=dp(50), padding=[dp(14), dp(14), dp(14), dp(10)],
+                     background_normal="", background_active="", background_color=FIELD,
+                     foreground_color=TXT, hint_text_color=MUT, cursor_color=ACC,
+                     write_tab=False, **kw)
 
 
-def tab(title, widgets):
-    t = TabbedPanelItem(text=fa(title), font_name=FONT)
-    sv = ScrollView()
-    box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8), size_hint_y=None)
-    box.bind(minimum_height=box.setter("height"))
+class RBtn(ButtonBehavior, Label):
+    def __init__(self, text, color=ACC, **kw):
+        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(16), color=(1, 1, 1, 1),
+                         size_hint_y=None, height=dp(50), **kw)
+        self._c = color
+        with self.canvas.before:
+            self._col = Color(*color)
+            self._r = RoundedRectangle(radius=[dp(12)])
+        self.bind(pos=self._u, size=self._u)
+
+    def _u(self, *_):
+        self._r.pos, self._r.size = self.pos, self.size
+
+    def on_press(self):
+        self._col.rgba = tuple(c * 0.7 for c in self._c[:3]) + (1,)
+
+    def on_release(self):
+        self._col.rgba = self._c
+
+
+def card(title, *widgets):
+    c = Bg(color=CARD, radius=14, orientation="vertical", size_hint_y=None,
+           padding=dp(14), spacing=dp(10))
+    c.bind(minimum_height=c.setter("height"))
+    if title:
+        c.add_widget(lab(title, size=15, bold=True))
     for w in widgets:
-        box.add_widget(w)
+        c.add_widget(w)
+    return c
+
+
+def page(*cards):
+    sv = ScrollView(do_scroll_x=False)
+    box = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(12), size_hint_y=None)
+    box.bind(minimum_height=box.setter("height"))
+    for c in cards:
+        box.add_widget(c)
     sv.add_widget(box)
-    t.add_widget(sv)
-    return t
+    return sv
 
 
+class LogRow(BoxLayout):
+    def __init__(self, ts, text, kind, **kw):
+        super().__init__(orientation="horizontal", size_hint_y=None, spacing=dp(8), **kw)
+        col = {"ok": GRN, "err": RED}.get(kind, TXT)
+        rtl = bool(_RTL.search(text))
+        t = Label(text=ts, font_name=FONT, font_size=sp(11), color=MUT, size_hint=(None, None),
+                  size=(dp(54), dp(18)), halign="left", valign="top")
+        t.bind(size=lambda i, s: setattr(i, "text_size", s))
+        m = Label(text=fa(text[:6000]), font_name=FONT, font_size=sp(13), color=col,
+                  halign="right" if rtl else "left", valign="top", size_hint_y=None)
+        m.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
+        m.bind(texture_size=lambda i, s: setattr(i, "height", s[1]))
+        m.bind(height=lambda i, h: setattr(self, "height", h + dp(6)))
+        self.add_widget(t)
+        self.add_widget(m)
+
+
+class NavBtn(ToggleButtonBehavior, Label):
+    def __init__(self, text, name, app, **kw):
+        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(12), color=MUT,
+                         group="nav", allow_no_selection=False, **kw)
+        self.name, self.app = name, app
+
+    def on_state(self, _w, st):
+        self.color = ACC if st == "down" else MUT
+        if st == "down":
+            self.app.sm.current = self.name
+
+
+class StatusBar(ButtonBehavior, Label):
+    pass
+
+
+# ---------------- app ----------------
 class SnappShopApp(App):
     title = "SnappShop"
 
@@ -140,87 +227,153 @@ class SnappShopApp(App):
         self.api = None
         self.vendor_id = ""
         self.auto_stop = threading.Event()
+        self.auto_on = False
         self.cfg_path = os.path.join(self.user_data_dir, "cfg.json")
-        cfg = {}
         try:
             cfg = json.load(open(self.cfg_path))
         except Exception:
-            pass
+            cfg = {}
 
-        root = BoxLayout(orientation="vertical", spacing=dp(4), padding=dp(4))
+        root = BoxLayout(orientation="vertical")
 
-        self.ent_ua = field("User-Agent (unique id)", cfg.get("ua", ""))
-        self.ent_token = field("Bearer Token", cfg.get("token", ""), password=True)
-        self.ent_vid = field("Vendor ID", cfg.get("vid", ""))
-        top = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(44 * 4 + 6))
-        for w in (self.ent_ua, self.ent_token, self.ent_vid, btn("🔍 تست اتصال و Vendor ID", self.test_connection)):
-            top.add_widget(w)
-        root.add_widget(top)
+        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(56))
+        header.add_widget(lab("پنل اسنپ‌شاپ", size=18, bold=True, halign="center"))
+        header.children[0].valign = "middle"
+        root.add_widget(header)
 
-        tp = TabbedPanel(do_default_tab=False, tab_height=dp(40), size_hint_y=0.5)
+        self.status = StatusBar(text="", font_name=FONT, font_size=sp(12), color=MUT,
+                                size_hint_y=None, height=dp(28), halign="center", shorten=True,
+                                shorten_from="right")
+        self.status.bind(size=lambda i, s: setattr(i, "text_size", (s[0] - dp(16), None)))
+        self.status.bind(on_release=lambda *_: setattr(self.sm, "current", "log"))
+        root.add_widget(self.status)
 
-        self.ent_sku = field("SKU / ID")
-        self.ent_stock = field("Stock", "10", input_filter="int")
-        self.ent_price = field("Price", "150000", input_filter="int")
-        tp.add_widget(tab("📦 محصولات", [
-            btn("📥 دریافت لیست محصولات", self.get_products),
-            self.ent_sku, self.ent_stock, self.ent_price,
-            btn("⚡ به‌روزرسانی کالا", self.update_product)]))
+        self.sm = ScreenManager(transition=NoTransition())
 
-        self.ent_ord = field("Order Number", input_filter="int")
-        self.ent_sd = field("Start YYYY-MM-DD")
-        self.ent_ed = field("End YYYY-MM-DD")
-        tp.add_widget(tab("🛒 سفارشات", [
-            btn("⚡ رویدادهای زنده", self.get_events),
-            self.ent_ord, btn("جزئیات سفارش", self.get_order_details),
-            self.ent_sd, self.ent_ed, btn("جستجوی تاریخچه", self.get_history)]))
+        # --- connection
+        self.ent_ua = inp("User-Agent", cfg.get("ua", ""))
+        self.ent_token = inp("Bearer Token", cfg.get("token", ""), password=True)
+        self.ent_vid = inp("Vendor ID", cfg.get("vid", ""))
+        b = RBtn("تست اتصال و دریافت شناسه فروشگاه")
+        b.bind(on_release=lambda *_: self.test_connection())
+        self._add("conn", page(card("احراز هویت",
+                                    lab("کد یکتا (User-Agent)", MUT, 12), self.ent_ua,
+                                    lab("توکن", MUT, 12), self.ent_token,
+                                    lab("شناسه فروشگاه", MUT, 12), self.ent_vid, b)))
 
-        self.ent_int = field("Interval (sec)", "60", input_filter="int")
-        tp.add_widget(tab("🔄 رصد خودکار", [
-            self.ent_int, btn("▶️ شروع", self.start_auto), btn("⏹️ توقف", self.stop_auto)]))
-        tp.default_tab = tp.tab_list[-1]
-        root.add_widget(tp)
+        # --- products
+        self.ent_sku = inp("SKU / ID")
+        self.ent_stock = inp("Stock", "10", input_filter="int")
+        self.ent_price = inp("Price", "150000", input_filter="int")
+        b1 = RBtn("دریافت لیست محصولات", ACC2)
+        b1.bind(on_release=lambda *_: self.get_products())
+        b2 = RBtn("به‌روزرسانی کالا")
+        b2.bind(on_release=lambda *_: self.update_product())
+        self._add("prod", page(
+            card("", b1),
+            card("به‌روزرسانی موجودی و قیمت",
+                 lab("کد کالا", MUT, 12), self.ent_sku,
+                 lab("موجودی جدید", MUT, 12), self.ent_stock,
+                 lab("قیمت جدید (تومان)", MUT, 12), self.ent_price, b2)))
 
-        sv = ScrollView(size_hint_y=0.5)
-        self.log_lbl = Label(text="", font_name=FONT, size_hint_y=None, halign="left", valign="top",
-                             color=(0, 1, 0.79, 1), markup=False)
-        self.log_lbl.bind(width=lambda i, w: setattr(i, "text_size", (w, None)),
-                          texture_size=lambda i, s: setattr(i, "height", s[1]))
-        sv.add_widget(self.log_lbl)
-        self.sv = sv
-        self.lines: List[str] = []
-        root.add_widget(sv)
+        # --- orders
+        self.ent_ord = inp("Order Number", input_filter="int")
+        self.ent_sd = inp("YYYY-MM-DD")
+        self.ent_ed = inp("YYYY-MM-DD")
+        o1 = RBtn("رویدادهای زنده سفارشات", ACC2)
+        o1.bind(on_release=lambda *_: self.get_events())
+        o2 = RBtn("مشاهده جزئیات سفارش")
+        o2.bind(on_release=lambda *_: self.get_order_details())
+        o3 = RBtn("جستجوی تاریخچه")
+        o3.bind(on_release=lambda *_: self.get_history())
+        self._add("ord", page(
+            card("", o1),
+            card("جزئیات یک سفارش", lab("شماره سفارش", MUT, 12), self.ent_ord, o2),
+            card("تاریخچه سفارشات", lab("از تاریخ", MUT, 12), self.ent_sd,
+                 lab("تا تاریخ", MUT, 12), self.ent_ed, o3)))
+
+        # --- auto
+        self.ent_int = inp("Seconds", "60", input_filter="int")
+        self.auto_lbl = lab("وضعیت: غیرفعال", MUT, 14, bold=True)
+        a1 = RBtn("شروع رصد", GRN[:3] + (1,))
+        a1.color = (0.04, 0.12, 0.07, 1)
+        a1.bind(on_release=lambda *_: self.start_auto())
+        a2 = RBtn("توقف رصد", (0.80, 0.26, 0.26, 1))
+        a2.bind(on_release=lambda *_: self.stop_auto())
+        self._add("auto", page(card("رصد خودکار رویدادها",
+                                    lab("فاصله بررسی (ثانیه)", MUT, 12), self.ent_int,
+                                    self.auto_lbl, a1, a2,
+                                    lab("رصد فقط وقتی کار می‌کند که برنامه باز باشد.", MUT, 11))))
+
+        # --- log
+        self.log_box = GridLayout(cols=1, size_hint_y=None, spacing=dp(4), padding=dp(12))
+        self.log_box.bind(minimum_height=self.log_box.setter("height"))
+        self.log_sv = ScrollView(do_scroll_x=False)
+        self.log_sv.add_widget(self.log_box)
+        clr = RBtn("پاک کردن گزارش", ACC2)
+        clr.height = dp(42)
+        clr.bind(on_release=lambda *_: self.log_box.clear_widgets())
+        lp = BoxLayout(orientation="vertical", padding=[dp(12), dp(8), dp(12), 0], spacing=dp(6))
+        lp.add_widget(clr)
+        lp.add_widget(self.log_sv)
+        self._add("log", lp)
+
+        root.add_widget(self.sm)
+
+        nav = Bg(color=BAR, size_hint_y=None, height=dp(56))
+        self.navs = []
+        for text, name in (("اتصال", "conn"), ("محصولات", "prod"), ("سفارشات", "ord"),
+                           ("رصد", "auto"), ("گزارش", "log")):
+            n = NavBtn(text, name, self)
+            self.navs.append(n)
+            nav.add_widget(n)
+        root.add_widget(nav)
+        self.navs[0].state = "down"
+
         self.log("آماده است.")
         return root
 
-    # logging (thread-safe)
-    def log(self, text):
+    def _add(self, name, widget):
+        s = Screen(name=name)
+        s.add_widget(widget)
+        self.sm.add_widget(s)
+
+    # ---- logging (thread-safe)
+    def log(self, text, kind="info"):
         def _do(_dt):
-            self.lines.append(f"[{time.strftime('%H:%M:%S')}] {fa(text)}")
-            self.lines = self.lines[-200:]
-            self.log_lbl.text = "\n".join(self.lines)
-            Clock.schedule_once(lambda _: setattr(self.sv, "scroll_y", 0), 0.05)
+            self.log_box.add_widget(LogRow(time.strftime("%H:%M"), text, kind))
+            if len(self.log_box.children) > 150:
+                self.log_box.remove_widget(self.log_box.children[-1])
+            self.status.text = fa(text.split("\n")[0][:90])
+            self.status.color = {"ok": GRN, "err": RED}.get(kind, MUT)
+            Clock.schedule_once(lambda _: setattr(self.log_sv, "scroll_y", 0), 0.1)
         Clock.schedule_once(_do, 0)
+
+    def _save(self):
+        try:
+            os.makedirs(self.user_data_dir, exist_ok=True)
+            json.dump({"ua": self.ent_ua.text.strip(), "token": self.ent_token.text.strip(),
+                       "vid": self.ent_vid.text.strip()}, open(self.cfg_path, "w"))
+        except Exception:
+            pass
 
     def _setup(self):
         ua, tok = self.ent_ua.text.strip(), self.ent_token.text.strip()
         if not ua or not tok:
-            self.log("❌ User-Agent و توکن الزامی است.")
+            self.log("User-Agent و توکن الزامی است.", "err")
+            self.sm.current = "conn"
             return False
         self.api = SnappShopAutomationAPI(ua, tok)
         self.vendor_id = self.ent_vid.text.strip()
-        try:
-            os.makedirs(self.user_data_dir, exist_ok=True)
-            json.dump({"ua": ua, "token": tok, "vid": self.vendor_id}, open(self.cfg_path, "w"))
-        except Exception:
-            pass
+        self._save()
         return True
 
     def _need_vid(self):
         if not self._setup():
             return False
         if not self.vendor_id:
-            self.log("❌ Vendor ID خالی است. ابتدا تست اتصال بزنید.")
+            self.log("شناسه فروشگاه خالی است. ابتدا تست اتصال بزنید.", "err")
+            self.sm.current = "conn"
             return False
         return True
 
@@ -229,12 +382,13 @@ class SnappShopApp(App):
             try:
                 fn()
             except Exception as e:
-                self.log(f"❌ خطا: {e}")
+                self.log(f"خطا: {e}", "err")
         threading.Thread(target=w, daemon=True).start()
 
     def _dump(self, o):
         self.log(json.dumps(o, ensure_ascii=False, indent=2))
 
+    # ---- actions
     def test_connection(self):
         if not self._setup():
             return
@@ -242,69 +396,90 @@ class SnappShopApp(App):
             v = self.api.get_first_vendor_id()
             if v:
                 self.vendor_id = v
-                Clock.schedule_once(lambda _: setattr(self.ent_vid, "text", v), 0)
-                self.log(f"✅ اتصال موفق. Vendor ID: {v}")
+                Clock.schedule_once(lambda _: (setattr(self.ent_vid, "text", v), self._save()), 0)
+                self.log(f"اتصال موفق. شناسه فروشگاه: {v}", "ok")
             else:
-                self.log("❌ شناسه فروشگاهی یافت نشد.")
+                self.log("شناسه فروشگاهی یافت نشد.", "err")
+        self.log("در حال اتصال...")
         self._run(f)
 
     def get_products(self):
         if not self._need_vid(): return
         def f():
             p = self.api.get_all_products(self.vendor_id)
-            self.log(f"✅ تعداد محصولات: {len(p)}")
+            self.log(f"تعداد محصولات: {len(p)}", "ok")
             self._dump(p[:5])
+        self.log("در حال دریافت محصولات...")
+        self.sm.current = "log"
         self._run(f)
 
     def update_product(self):
         if not self._need_vid(): return
         sku, st, pr = self.ent_sku.text.strip(), self.ent_stock.text.strip(), self.ent_price.text.strip()
         if not (sku and st and pr):
-            self.log("❌ SKU، موجودی و قیمت الزامی است.")
+            self.log("کد کالا، موجودی و قیمت الزامی است.", "err")
             return
         def f():
-            self._dump(self.api.update_products(self.vendor_id, [{"sku": sku, "stock": int(st), "price": int(pr)}]))
+            r = self.api.update_products(self.vendor_id, [{"sku": sku, "stock": int(st), "price": int(pr)}])
+            self.log("به‌روزرسانی انجام شد.", "ok")
+            self._dump(r)
+        self.sm.current = "log"
         self._run(f)
 
     def get_events(self):
         if not self._need_vid(): return
         def f():
             e = self.api.get_all_latest_events(self.vendor_id)
-            self.log(f"✅ رویدادها: {len(e)}")
-            self._dump(e)
+            self.log(f"تعداد رویدادها: {len(e)}", "ok")
+            if e:
+                self._dump(e)
+        self.sm.current = "log"
         self._run(f)
 
     def get_order_details(self):
         if not self._need_vid(): return
         n = self.ent_ord.text.strip()
         if not n:
-            self.log("❌ شماره سفارش را وارد کنید.")
+            self.log("شماره سفارش را وارد کنید.", "err")
             return
+        self.sm.current = "log"
         self._run(lambda: self._dump(self.api.get_order_details(self.vendor_id, int(n))))
 
     def get_history(self):
         if not self._need_vid(): return
         s, e = self.ent_sd.text.strip() or None, self.ent_ed.text.strip() or None
+        self.sm.current = "log"
         self._run(lambda: self._dump(self.api.get_orders_history(self.vendor_id, s, e)))
+
+    def _set_auto_label(self, on):
+        self.auto_lbl.text = fa("وضعیت: فعال" if on else "وضعیت: غیرفعال")
+        self.auto_lbl.color = GRN if on else MUT
 
     def start_auto(self):
         if not self._need_vid(): return
+        if self.auto_on:
+            return
+        self.auto_on = True
         self.auto_stop.clear()
-        iv = int(self.ent_int.text or 60)
-        self.log(f"🔄 رصد خودکار هر {iv} ثانیه (فقط وقتی برنامه باز است)")
+        iv = max(5, int(self.ent_int.text or 60))
+        self._set_auto_label(True)
+        self.log(f"رصد خودکار فعال شد (هر {iv} ثانیه).", "ok")
         def loop():
             while not self.auto_stop.is_set():
                 try:
                     e = self.api.get_all_latest_events(self.vendor_id)
-                    self.log(f"🔔 {len(e)} رویداد جدید" if e else "رویداد جدیدی نیست.")
+                    self.log(f"{len(e)} رویداد جدید یافت شد." if e else "رویداد جدیدی نیست.",
+                             "ok" if e else "info")
                 except Exception as ex:
-                    self.log(f"خطا: {ex}")
+                    self.log(f"خطا: {ex}", "err")
                 self.auto_stop.wait(iv)
+            self.auto_on = False
         threading.Thread(target=loop, daemon=True).start()
 
     def stop_auto(self):
         self.auto_stop.set()
-        self.log("⏹️ متوقف شد.")
+        self._set_auto_label(False)
+        self.log("رصد خودکار متوقف شد.")
 
     def on_pause(self):
         return True
