@@ -16,10 +16,25 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
+          sudo apt-get install -y git zip unzip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev libltdl-dev
           pip install --upgrade pip buildozer cython virtualenv setuptools
       - name: Build
-        run: buildozer -v android debug
+        run: |
+          set +e
+          buildozer -v android debug > build.log 2>&1
+          echo $? > code.txt
+          exit 0
+      - name: Show errors
+        run: |
+          grep -n -iE "error|failed|not found|exception" build.log | tail -n 40 || true
+          echo "=========== LAST LINES ==========="
+          tail -n 40 build.log
+          test "$(cat code.txt)" = "0"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: build.log
       - uses: actions/upload-artifact@v4
         with:
           name: snappshop-apk
