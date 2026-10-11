@@ -209,7 +209,7 @@ class NavBtn(ToggleButtonBehavior, Label):
     def __init__(self, text, name, app, **kw):
         super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(12), color=MUT,
                          group="nav", allow_no_selection=False, **kw)
-        self.name, self.app = name
+        self.name, self.app = name, app
 
     def on_state(self, _w, st):
         self.color = ACC if st == "down" else MUT
