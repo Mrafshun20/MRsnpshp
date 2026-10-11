@@ -71,16 +71,21 @@ class SnappShopAutomationAPI:
 
     def get_first_vendor_id(self) -> Optional[str]:
         v = self._request("GET", "vendors").get("data", [])
-        return v[0].get("id") if v else None
+        if v:
+            return v[0].get("id")
+        return None
 
     def get_all_products(self, vid: str) -> List[Dict[str, Any]]:
-        out, page = [], 1
+        out = []
+        page = 1
         while True:
             res = self._request("GET", f"vendors/{vid}/products", params={"page": page})
             d = res.get("data", [])
-            if not d: break
+            if not d:
+                break
             out.extend(d)
-            if page >= res.get("meta", {}).get("pagination", {}).get("total_pages", 1): break
+            if page >= res.get("meta", {}).get("pagination", {}).get("total_pages", 1):
+                break
             page += 1
         return out
 
@@ -92,14 +97,18 @@ class SnappShopAutomationAPI:
         return out
 
     def get_all_latest_events(self, vid: str) -> List[Dict[str, Any]]:
-        ev, cursor = [], None
+        ev = []
+        cursor = None
         while True:
-            res = self._request("GET", f"vendors/{vid}/orders/events", params={"cursor": cursor} if cursor else {})
+            params = {"cursor": cursor} if cursor else {}
+            res = self._request("GET", f"vendors/{vid}/orders/events", params=params)
             b = res.get("data", [])
-            if not b: break
+            if not b:
+                break
             ev.extend(b)
             m = res.get("meta", {}).get("pagination", {})
-            if not m.get("has_more") or not m.get("next_cursor"): break
+            if not m.get("has_more") or not m.get("next_cursor"):
+                break
             cursor = m["next_cursor"]
         return ev
 
@@ -108,8 +117,10 @@ class SnappShopAutomationAPI:
 
     def get_orders_history(self, vid: str, s=None, e=None):
         p = {}
-        if s: p["start_date"] = s
-        if e: p["end_date"] = e
+        if s:
+            p["start_date"] = s
+        if e:
+            p["end_date"] = e
         return self._request("GET", f"vendors/{vid}/orders", params=p)
 
 # ---------------- widgets ----------------
@@ -122,7 +133,8 @@ class Bg(BoxLayout):
         self.bind(pos=self._u, size=self._u)
 
     def _u(self, *_):
-        self._r.pos, self._r.size = self.pos, self.size
+        self._r.pos = self.pos
+        self._r.size = self.size
 
 def lab(text, color=TXT, size=14, bold=False, halign="right"):
     l = Label(text=fa(text), font_name=FONT_B if bold else FONT, font_size=sp(size),
@@ -149,7 +161,8 @@ class RBtn(ButtonBehavior, Label):
         self.bind(pos=self._u, size=self._u)
 
     def _u(self, *_):
-        self._r.pos, self._r.size = self.pos, self.size
+        self._r.pos = self.pos
+        self._r.size = self.size
 
     def on_press(self):
         self._col.rgba = tuple(c * 0.7 for c in self._c[:3]) + (1,)
@@ -160,8 +173,10 @@ class RBtn(ButtonBehavior, Label):
 def card(title, *widgets):
     c = Bg(color=CARD, radius=14, orientation="vertical", size_hint_y=None, padding=dp(14), spacing=dp(10))
     c.bind(minimum_height=c.setter("height"))
-    if title: c.add_widget(lab(title, size=15, bold=True))
-    for w in widgets: c.add_widget(w)
+    if title:
+        c.add_widget(lab(title, size=15, bold=True))
+    for w in widgets:
+        c.add_widget(w)
     return c
 
 class ProductRow(Bg):
@@ -226,7 +241,8 @@ class LogRow(BoxLayout):
 class NavBtn(ToggleButtonBehavior, Label):
     def __init__(self, text, name, app, **kw):
         super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(12), color=MUT, group="nav", allow_no_selection=False, **kw)
-        self.name, self.app = name, app
+        self.name = name
+        self.app = app
 
     def on_state(self, _w, st):
         self.color = ACC if st == "down" else MUT
@@ -248,8 +264,10 @@ class SnappShopApp(App):
         self.prods = []
         self.ords = []
         self.cfg_path = os.path.join(self.user_data_dir, "cfg.json")
-        try: cfg = json.load(open(self.cfg_path))
-        except Exception: cfg = {}
+        try:
+            cfg = json.load(open(self.cfg_path))
+        except Exception:
+            cfg = {}
 
         root = BoxLayout(orientation="vertical")
 
@@ -360,7 +378,8 @@ class SnappShopApp(App):
         sv = ScrollView(do_scroll_x=False)
         box = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(12), size_hint_y=None)
         box.bind(minimum_height=box.setter("height"))
-        for w in widgets: box.add_widget(w)
+        for w in widgets:
+            box.add_widget(w)
         sv.add_widget(box)
         return sv
 
@@ -372,7 +391,8 @@ class SnappShopApp(App):
     def log(self, text, kind="info"):
         def _do(_dt):
             self.log_box.add_widget(LogRow(time.strftime("%H:%M"), text, kind))
-            if len(self.log_box.children) > 150: self.log_box.remove_widget(self.log_box.children[-1])
+            if len(self.log_box.children) > 150:
+                self.log_box.remove_widget(self.log_box.children[-1])
             self.status.text = fa(text.split("\n")[0][:90])
             self.status.color = {"ok": GRN, "err": RED}.get(kind, MUT)
             Clock.schedule_once(lambda _: setattr(self.log_sv, "scroll_y", 0), 0.1)
@@ -382,10 +402,12 @@ class SnappShopApp(App):
         try:
             os.makedirs(self.user_data_dir, exist_ok=True)
             json.dump({"ua": self.ent_ua.text.strip(), "token": self.ent_token.text.strip(), "vid": self.ent_vid.text.strip()}, open(self.cfg_path, "w"))
-        except Exception: pass
+        except Exception:
+            pass
 
     def _setup(self):
-        ua, tok = self.ent_ua.text.strip(), self.ent_token.text.strip()
+        ua = self.ent_ua.text.strip()
+        tok = self.ent_token.text.strip()
         if not ua or not tok:
             self.log("User-Agent و توکن الزامی است.", "err")
             self.sm.current = "conn"
@@ -396,7 +418,8 @@ class SnappShopApp(App):
         return True
 
     def _need_vid(self):
-        if not self._setup(): return False
+        if not self._setup():
+            return False
         if not self.vendor_id:
             self.log("شناسه فروشگاه خالی است. ابتدا تست اتصال بزنید.", "err")
             self.sm.current = "conn"
@@ -405,27 +428,32 @@ class SnappShopApp(App):
 
     def _run(self, fn):
         def w():
-            try: fn()
-            except Exception as e: self.log(f"خطا: {e}", "err")
+            try:
+                fn()
+            except Exception as e:
+                self.log(f"خطا: {e}", "err")
         threading.Thread(target=w, daemon=True).start()
 
     def _dump(self, o):
         self.log(json.dumps(o, ensure_ascii=False, indent=2))
 
     def test_connection(self):
-        if not self._setup(): return
+        if not self._setup():
+            return
         def f():
             v = self.api.get_first_vendor_id()
             if v:
                 self.vendor_id = v
                 Clock.schedule_once(lambda _: (setattr(self.ent_vid, "text", v), self._save()), 0)
                 self.log(f"اتصال موفق. شناسه فروشگاه: {v}", "ok")
-            else: self.log("شناسه فروشگاهی یافت نشد.", "err")
+            else:
+                self.log("شناسه فروشگاهی یافت نشد.", "err")
         self.log("در حال اتصال...")
         self._run(f)
 
     def get_products(self):
-        if not self._need_vid(): return
+        if not self._need_vid():
+            return
         def f():
             raw_prods = self.api.get_all_products(self.vendor_id)
             self.prods = [logic.norm_prod(p, i) for i, p in enumerate(raw_prods)]
@@ -440,8 +468,11 @@ class SnappShopApp(App):
         self.log(f"تعداد {len(self.prods)} محصول بارگذاری شد.", "ok")
 
     def update_product(self):
-        if not self._need_vid(): return
-        sku, st, pr = self.ent_sku.text.strip(), self.ent_stock.text.strip(), self.ent_price.text.strip()
+        if not self._need_vid():
+            return
+        sku = self.ent_sku.text.strip()
+        st = self.ent_stock.text.strip()
+        pr = self.ent_price.text.strip()
         if not (sku and st and pr):
             self.log("کد کالا، موجودی و قیمت الزامی است.", "err")
             return
@@ -453,15 +484,16 @@ class SnappShopApp(App):
         self._run(f)
 
     def do_undercut(self):
-        if not self._need_vid(): return
+        if not self._need_vid():
+            return
         delta = int(self.ent_delta.text or 5000)
         floor = int(self.ent_floor.text or 0)
 
-        # اگر هیچ محصولی تیک نخورده بود، اونایی که بای‌باکس رو باختن انتخاب میشن
         has_sel = any(p.sel for p in self.prods)
         if not has_sel:
             for p in self.prods:
-                if p.lose: p.sel = True
+                if p.lose:
+                    p.sel = True
 
         rows, skipped = logic.plan_undercut(self.prods, delta, floor)
         valid_rows = [r for r in rows if not r['why']]
@@ -475,4 +507,106 @@ class SnappShopApp(App):
             updates = [{"sku": r['o'].sku, "price": r['np'], "stock": r['o'].stock} for r in valid_rows]
             res = self.api.update_products(self.vendor_id, updates)
             for r in valid_rows:
-           
+                r['o'].price = r['np']
+                r['o'].sel = False
+            Clock.schedule_once(lambda _: self._render_products(), 0)
+            self.log(f"قیمت {len(updates)} کالا با موفقیت آپدیت شد.", "ok")
+
+        self.sm.current = "log"
+        self.log(f"در حال تحلیل رقبا و اعمال قیمت‌های جدید روی {len(valid_rows)} کالا...")
+        self._run(f)
+
+    def load_orders(self):
+        if not self._need_vid():
+            return
+        s = self.ent_sd.text.strip() or None
+        e = self.ent_ed.text.strip() or None
+        def f():
+            raw_orders = self.api.get_orders_history(self.vendor_id, s, e)
+            d = raw_orders.get("data", raw_orders) if isinstance(raw_orders, dict) else raw_orders
+            if not isinstance(d, list):
+                d = logic.first_array(raw_orders) or []
+            self.ords = [logic.norm_order(o, i) for i, o in enumerate(d)]
+            Clock.schedule_once(lambda _: self._render_orders(), 0)
+        self.log("در حال دریافت سفارشات...")
+        self._run(f)
+
+    def _render_orders(self):
+        self.ord_list.clear_widgets()
+        for o in self.ords[:100]:
+            self.ord_list.add_widget(OrderRow(o))
+        self.log(f"تعداد {len(self.ords)} سفارش بارگذاری شد.", "ok")
+
+    def export_excel(self):
+        if not self._need_vid():
+            return
+        s = self.ent_sd.text.strip() or None
+        e = self.ent_ed.text.strip() or None
+        def f():
+            orders = self.api.get_orders_history(self.vendor_id, s, e)
+            raw_data = orders.get("data", orders) if isinstance(orders, dict) else orders
+            if not raw_data:
+                self.log("سفارشی در این بازه پیدا نشد.", "err")
+                return
+            cols, rows = logic.sales_rows(raw_data)
+            excel_bytes = logic.make_xlsx(cols, rows, "Sales")
+            path = os.path.join(self.user_data_dir, f"sales_report_{int(time.time())}.xlsx")
+            with open(path, "wb") as f_out:
+                f_out.write(excel_bytes)
+            self.log(f"فایل اکسل ساخته شد:\n{path}", "ok")
+        self.sm.current = "log"
+        self.log("در حال ساخت گزارش اکسل...")
+        self._run(f)
+
+    def get_order_details(self):
+        if not self._need_vid():
+            return
+        n = self.ent_ord.text.strip()
+        if not n:
+            self.log("شماره سفارش را وارد کنید.", "err")
+            return
+        self.sm.current = "log"
+        self._run(lambda: self._dump(self.api.get_order_details(self.vendor_id, int(n))))
+
+    def get_events(self):
+        if not self._need_vid():
+            return
+        def f():
+            e = self.api.get_all_latest_events(self.vendor_id)
+            self.log(f"تعداد رویدادها: {len(e)}", "ok")
+            if e:
+                self._dump(e)
+        self.sm.current = "log"
+        self._run(f)
+
+    def start_auto(self):
+        if not self._need_vid() or self.auto_on:
+            return
+        self.auto_on = True
+        self.auto_stop.clear()
+        iv = max(5, int(self.ent_int.text or 60))
+        self.auto_lbl.text = fa("وضعیت: فعال")
+        self.auto_lbl.color = GRN
+        self.log(f"رصد خودکار فعال شد (هر {iv} ثانیه).", "ok")
+        def loop():
+            while not self.auto_stop.is_set():
+                try:
+                    e = self.api.get_all_latest_events(self.vendor_id)
+                    self.log(f"{len(e)} رویداد جدید یافت شد." if e else "رویداد جدیدی نیست.", "ok" if e else "info")
+                except Exception as ex:
+                    self.log(f"خطا: {ex}", "err")
+                self.auto_stop.wait(iv)
+            self.auto_on = False
+        threading.Thread(target=loop, daemon=True).start()
+
+    def stop_auto(self):
+        self.auto_stop.set()
+        self.auto_lbl.text = fa("وضعیت: غیرفعال")
+        self.auto_lbl.color = MUT
+        self.log("رصد خودکار متوقف شد.")
+
+    def on_pause(self):
+        return True
+
+if __name__ == "__main__":
+    SnappShopApp().run()
