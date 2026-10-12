@@ -243,7 +243,7 @@ def _col(i: int) -> str:
     return s
 
 
-def make_xlsx(cols, rows, sheet="Sales") -> bytes:
+def _sheet_xml(cols, rows) -> str:
     NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     H = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     sd = [H, f'<worksheet xmlns="{NS}"><sheetViews><sheetView rightToLeft="1" workbookViewId="0">'
@@ -269,19 +269,100 @@ def make_xlsx(cols, rows, sheet="Sales") -> bytes:
                 sd.append(f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{_x(v)}</t></is></c>')
         sd.append("</row>")
     sd.append("</sheetData></worksheet>")
+    return "".join(sd)
+
+
+def make_xlsx_multi(sheets) -> bytes:
+    """sheets: list of (name, cols, rows)."""
+    NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    H = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    n = len(sheets)
+    ct = "".join(f'<Override PartName="/xl/worksheets/sheet{i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for i in range(n))
+    sh = "".join(f'<sheet name="{_x(s[0])[:31]}" sheetId="{i+1}" r:id="rId{i+1}"/>' for i, s in enumerate(sheets))
+    rel = "".join(f'<Relationship Id="rId{i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i+1}.xml"/>' for i in range(n))
+    rel += f'<Relationship Id="rId{n+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
     files = {
-        "[Content_Types].xml": H + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
+        "[Content_Types].xml": H + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + ct + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
         "_rels/.rels": H + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
-        "xl/workbook.xml": H + f'<workbook xmlns="{NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{_x(sheet)}" sheetId="1" r:id="rId1"/></sheets></workbook>',
-        "xl/_rels/workbook.xml.rels": H + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+        "xl/workbook.xml": H + f'<workbook xmlns="{NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{sh}</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": H + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rel + '</Relationships>',
         "xl/styles.xml": H + f'<styleSheet xmlns="{NS}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
-        "xl/worksheets/sheet1.xml": "".join(sd),
     }
+    for i, (_name, cols, rows) in enumerate(sheets):
+        files[f"xl/worksheets/sheet{i+1}.xml"] = _sheet_xml(cols, rows)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in files.items():
             z.writestr(name, data)
     return buf.getvalue()
+
+
+def make_xlsx(cols, rows, sheet="Sales") -> bytes:
+    return make_xlsx_multi([(sheet, cols, rows)])
+
+
+# ---------------- sales summaries (accounting) ----------------
+ITSKUK = ["sku", "vendorsku", "sellersku", "productcode", "code", "id"]
+ITNAMEK = ["title", "name", "productname", "producttitle"]
+QTYK = ["quantity", "qty", "count"]
+UPK = ["price", "unitprice", "sellingprice", "finalprice", "unitamount", "amount"]
+FA_HEAD = {"ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش", "status": "وضعیت",
+           "createdat": "تاریخ", "orderdate": "تاریخ", "date": "تاریخ", "total": "مبلغ کل", "totalprice": "مبلغ کل",
+           "sku": "کد کالا", "title": "نام", "name": "نام", "quantity": "تعداد", "qty": "تعداد", "price": "قیمت واحد",
+           "count": "تعداد"}
+
+
+def fa_header(col: str) -> str:
+    tail = norm(col.split(".")[-1])
+    base = FA_HEAD.get(tail)
+    if not base:
+        return col
+    return ("کالا: " + base) if col.startswith("item.") else base
+
+
+def sales_summary(orders: List[dict]):
+    by_sku: Dict[str, dict] = {}
+    by_day: Dict[str, dict] = {}
+    for o in orders:
+        t = find(o, OTOTK)
+        total = to_num(t["value"]) if t else None
+        d = find(o, ODTK)
+        day = str(d["value"])[:10] if d else "؟"
+        nu = find(o, ONUMK)
+        num = str(nu["value"]) if nu else ""
+        rec = by_day.setdefault(day, {"تاریخ": day, "تعداد سفارش": 0, "جمع فروش": 0.0})
+        rec["تعداد سفارش"] += 1
+        rec["جمع فروش"] += total or 0
+        for it in first_array(o) or []:
+            sk, nm = find(it, ITSKUK), find(it, ITNAMEK)
+            q, p = find(it, QTYK), find(it, UPK)
+            key = str(sk["value"]) if sk else "؟"
+            qty = to_num(q["value"]) if q else 1
+            qty = 1 if qty is None else qty
+            price = to_num(p["value"]) if p else None
+            r = by_sku.setdefault(key, {"کد کالا": key, "نام": str(nm["value"]) if nm else "", "تعداد": 0,
+                                        "جمع فروش": 0.0, "_orders": set()})
+            r["تعداد"] += qty
+            r["جمع فروش"] += qty * price if price is not None else 0
+            r["_orders"].add(num)
+    sku_rows = []
+    for r in sorted(by_sku.values(), key=lambda x: -x["جمع فروش"]):
+        sku_rows.append({"کد کالا": r["کد کالا"], "نام": r["نام"], "تعداد": r["تعداد"],
+                         "جمع فروش": r["جمع فروش"], "تعداد سفارش": len(r["_orders"])})
+    day_rows = [by_day[k] for k in sorted(by_day)]
+    return sku_rows, day_rows
+
+
+def build_sales_workbook(orders: List[dict]) -> bytes:
+    cols, rows = sales_rows(orders)
+    head = {c: fa_header(c) for c in cols}
+    drows = [{head[c]: r.get(c) for c in cols} for r in rows]
+    sku_rows, day_rows = sales_summary(orders)
+    return make_xlsx_multi([
+        ("ریز سفارشات", [head[c] for c in cols], drows),
+        ("خلاصه کالا", ["کد کالا", "نام", "تعداد", "جمع فروش", "تعداد سفارش"], sku_rows),
+        ("خلاصه روزانه", ["تاریخ", "تعداد سفارش", "جمع فروش"], day_rows),
+    ])
 
 
 # ---------------- redaction ----------------
@@ -317,3 +398,72 @@ def plan_undercut(products: List[Prod], delta: int, floor: int):
             why = "قیمت شما از قبل پایین‌تر است"
         rows.append({"o": o, "np": np_, "why": why})
     return rows, skipped
+
+
+# ---------------- automatic repricing ----------------
+def plan_auto(products: List[Prod], delta: int, mins: Dict[str, float], max_drop_pct: float = 15.0,
+              require_min: bool = True):
+    """Safe automatic undercut. Returns (changes, skips).
+    changes: [{sku,name,old,new,comp}]; skips: {reason: [sku,...]}"""
+    changes, skips = [], {}
+    def skip(why, sku):
+        skips.setdefault(why, []).append(sku)
+    for o in products:
+        if not o.lose:
+            continue
+        if o.inactive or o.oos:
+            skip("غیرفعال/ناموجود", o.sku)
+            continue
+        if o.comp is None or o.price is None or not o.sku:
+            skip("قیمت نفر اول نامشخص", o.sku)
+            continue
+        np_ = int(o.comp - delta)
+        if np_ <= 0:
+            skip("قیمت نامعتبر", o.sku)
+            continue
+        if np_ >= o.price:
+            skip("قیمت شما از قبل پایین‌تر است", o.sku)
+            continue
+        floor = mins.get(o.sku)
+        if floor is None and require_min:
+            skip("بدون حداقل قیمت", o.sku)
+            continue
+        if floor is not None and np_ < floor:
+            skip("زیر حداقل قیمت", o.sku)
+            continue
+        if max_drop_pct and (o.price - np_) / o.price * 100 > max_drop_pct:
+            skip("افت قیمت بیش از حد مجاز", o.sku)
+            continue
+        changes.append({"sku": o.sku, "name": o.name, "old": int(o.price), "new": np_, "comp": int(o.comp)})
+    return changes, skips
+
+
+def read_mins_csv(path: str) -> Dict[str, float]:
+    import csv
+    out: Dict[str, float] = {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return out
+    head = [norm(h) for h in rows[0]]
+    si = next((i for i, h in enumerate(head) if h in ("sku", "code", "id")), 0)
+    mi = next((i for i, h in enumerate(head) if "min" in h), None)
+    if mi is None:
+        mi = 1 if len(head) > 1 else 0
+    for r in rows[1:]:
+        if len(r) <= max(si, mi):
+            continue
+        v = to_num(r[mi])
+        if r[si].strip() and v is not None and v > 0:
+            out[r[si].strip()] = v
+    return out
+
+
+def write_mins_csv(path: str, products: List[Prod], mins: Dict[str, float]):
+    import csv
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["sku", "name", "price", "competitor_price", "min_price"])
+        for o in products:
+            w.writerow([o.sku, o.name, "" if o.price is None else int(o.price),
+                        "" if o.comp is None else int(o.comp), "" if o.sku not in mins else int(mins[o.sku])])
