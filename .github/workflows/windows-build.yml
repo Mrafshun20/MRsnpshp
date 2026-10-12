@@ -23,6 +23,9 @@ jobs:
         pip install kivy==2.3.0 kivy_deps.sdl2 kivy_deps.glew kivy_deps.angle requests urllib3 idna charset-normalizer certifi arabic-reshaper python-bidi==0.4.2 future pyinstaller
 
     - name: Build EXE with PyInstaller
+      env:
+        KIVY_GL_BACKEND: angle_sdl2
+        KIVY_NO_CONSOLELOG: 1
       run: |
         pyinstaller --noconfirm --onefile --windowed --add-data "DejaVuSans.ttf;." --add-data "DejaVuSans-Bold.ttf;." --hidden-import "kivy_deps.sdl2" --hidden-import "kivy_deps.glew" --hidden-import "kivy_deps.angle" main.py
 
@@ -31,3 +34,4 @@ jobs:
       with:
         name: SnappShop-Windows-EXE
         path: dist/main.exe
+        
