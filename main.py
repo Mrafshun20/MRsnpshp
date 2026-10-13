@@ -1,5 +1,25 @@
 # -*- coding: utf-8 -*-
-import csv, json, os, shutil, sys, threading, time
+import csv, json, ntpath, os, shutil, site, sys, threading, time
+
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+if getattr(site, "USER_BASE", None) is None:
+    site.USER_BASE = HERE
+if getattr(site, "USER_SITE", None) is None:
+    site.USER_SITE = HERE
+
+_orig_join = ntpath.join
+def _safe_join(a, *p):
+    return _orig_join(a if a is not None else HERE, *[x for x in p if x is not None])
+ntpath.join = os.path.join = _safe_join
+
+if hasattr(os, "add_dll_directory"):
+    for _d in ("", "share\\sdl2\\bin", "share\\glew\\bin", "share\\angle\\bin"):
+        _p = _orig_join(HERE, _d) if _d else HERE
+        if os.path.isdir(_p):
+            try:
+                os.add_dll_directory(_p)
+            except Exception:
+                pass
 
 # PyInstaller --windowed has no stdout/stderr; Kivy would crash writing to None
 if sys.stdout is None:
@@ -7,6 +27,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
+
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -52,7 +73,6 @@ AMB = (0.98, 0.74, 0.16, 1)
 TXT = (0.93, 0.95, 0.98, 1)
 MUT = (0.56, 0.62, 0.73, 1)
 
-HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 LabelBase.register(name="fa",
                    fn_regular=os.path.join(HERE, "DejaVuSans.ttf"),
                    fn_bold=os.path.join(HERE, "DejaVuSans-Bold.ttf"))
@@ -67,6 +87,13 @@ def fa(text) -> str:
 
 def n(x) -> str:
     return "—" if x is None else f"{int(round(x)):,}"
+
+
+def to_num_safe(v):
+    try:
+        return float(v) if v is not None else None
+    except Exception:
+        return None
 
 
 # ---------------- API ----------------
@@ -280,6 +307,197 @@ class LogRow(BoxLayout):
     def __init__(self, ts, text, kind, **kw):
         super().__init__(orientation="horizontal", size_hint_y=None, spacing=dp(8), **kw)
         import re
+        col = {"ok": GRN, "err": RED}.get(kind, TXT)
+        rtl = bool(re.search("[\u0600-\u06FF]", text))
+        t = Label(text=ts, font_name=FONT, font_size=sp(11), color=MUT, size_hint=(None, None),
+                  size=(dp(54), dp(18)), halign="left", valign="top")
+        t.bind(size=lambda i, s: setattr(i, "text_size", s))
+        m = Label(text=fa(text[:6000]), font_name=FONT, font_size=sp(13), color=col,
+                  halign="right" if rtl else "left", valign="top", size_hint_y=None)
+        m.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
+        m.bind(texture_size=lambda i, s: setattr(i, "height", s[1]))
+        m.bind(height=lambda i, h: setattr(self, "height", h + dp(6)))
+        self.add_widget(t)
+        self.add_widget(m)
+
+
+class NavBtn(ToggleButtonBehavior, Label):
+    def __init__(self, text, name, app, **kw):
+        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(13), color=MUT,
+                         group="nav", allow_no_selection=False, **kw)
+        self.name, self.app = name, app
+
+    def on_state(self, _w, st):
+        self.color = ACC if st == "down" else MUT
+        if st == "down":
+            self.app.sm.current = self.name
+
+
+class StatusBar(ButtonBehavior, Label):
+    pass
+
+
+class ProdCard(Bg):
+    def __init__(self, o, app, **kw):
+        bcol = (0.18, 0.45, 0.30, 1) if o.bb is True else ((0.45, 0.22, 0.22, 1) if o.lose else (0.16, 0.20, 0.30, 1))
+        super().__init__(color=CARD, radius=12, border_color=bcol, orientation="vertical",
+                         size_hint_y=None, padding=dp(12), spacing=dp(6), **kw)
+        self.o, self.app = o, app
+        self.bind(minimum_height=self.setter("height"))
+        top = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(10))
+        top.bind(minimum_height=top.setter("height"))
+        cb = CheckBox(size_hint=(None, None), size=(dp(34), dp(34)), active=o.sel)
+        cb.bind(active=self._sel)
+        tap = Tap(orientation="vertical", size_hint_y=None, spacing=dp(2))
+        tap.bind(minimum_height=tap.setter("height"))
+        title_txt = o.name + (f"  [{o.variation}]" if o.variation else "")
+        tap.add_widget(lab(title_txt, bold=True, size=14))
+        id_line = f"ID: {o.id}" + (f"  |  SKU: {o.real_sku}" if o.real_sku else "") + (f"  |  کد: {o.product_number}" if o.product_number else "")
+        tap.add_widget(lab(id_line, MUT, 11))
+        tap.bind(on_release=lambda *_: app.edit_product(o))
+        top.add_widget(cb)
+        top.add_widget(tap)
+        self.add_widget(top)
+
+        price_line = f"قیمت: {n(o.price)}"
+        if o.sp:
+            price_line += f"   |   با تخفیف: {n(o.sp)}"
+        price_line += f"   |   موجودی: {n(o.stock)}"
+        self.add_widget(lab(price_line, size=13))
+
+        bs = []
+        if o.inactive:
+            bs.append(badge("غیرفعال", "r"))
+        if o.oos:
+            bs.append(badge("ناموجود", "o"))
+        if o.bb is True:
+            bs.append(badge(f"برنده بای‌باکس ({n(o.comp)})" if o.comp else "برنده بای‌باکس", "g"))
+        elif o.lose:
+            diff = int((o.eff_price or 0) - (o.comp or 0)) if (o.eff_price and o.comp) else 0
+            diff_txt = f" (+{n(diff)})" if diff > 0 else ""
+            bs.append(badge(f"نفر اول: {n(o.comp)}{diff_txt}" if o.comp is not None else "بدون بای‌باکس", "r"))
+        min_v = app.mins.get(o.sku) or app.mins.get(o.id)
+        if min_v:
+            bs.append(badge(f"کف ربات: {n(min_v)}", "n"))
+        if bs:
+            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(26), spacing=dp(6))
+            row.add_widget(BoxLayout())
+            for b in bs:
+                row.add_widget(b)
+            self.add_widget(row)
+
+    def _sel(self, _i, val):
+        self.o.sel = val
+        self.app.upd_sel()
+
+
+FILT = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"), ("oos", "ناموجود"),
+        ("bb", "بای‌باکس دارم"), ("lose", "بای‌باکس ندارم")]
+
+
+# ---------------- app ----------------
+class SnappShopApp(App):
+    title = "SnappShop Automation"
+
+    def build(self):
+        self.api = None
+        self.vendor_id = ""
+        self.bot_ev = threading.Event()
+        self.bot_on = False
+        self.log_lock = threading.Lock()
+        self.P: List[Any] = []
+        self.PF, self.Q, self.shown = "all", "", 100
+        self.O: List[Any] = []
+        self.OF = "all"
+        self.cfg_path = os.path.join(self.user_data_dir, "cfg.json")
+        self.data_dir = self.user_data_dir
+        self.mins_path = os.path.join(self.data_dir, "mins.json")
+        self.hist_path = os.path.join(self.data_dir, "reprice_history.csv")
+        self.flog_path = os.path.join(self.data_dir, "automation.log")
+        try:
+            with open(self.cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+        self.auto_cfg = {"bot": False, "interval": 10, "delta": 5000, "maxdrop": 15, "reqmin": True, "winstart": False}
+        self.auto_cfg.update(cfg.get("auto", {}))
+        try:
+            with open(self.mins_path, encoding="utf-8") as f:
+                self.mins = {k: float(v) for k, v in json.load(f).items()}
+        except Exception:
+            self.mins = {}
+
+        root = BoxLayout(orientation="vertical")
+        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(54))
+        header.add_widget(lab("پنل مدیریت و اتوماسیون اسنپ‌شاپ", size=17, bold=True, halign="center"))
+        root.add_widget(header)
+
+        self.status = StatusBar(text="", font_name=FONT, font_size=sp(12), color=MUT,
+                                size_hint_y=None, height=dp(28), halign="center", shorten=True, shorten_from="right")
+        self.status.bind(size=lambda i, s: setattr(i, "text_size", (s[0] - dp(16), None)))
+        self.status.bind(on_release=lambda *_: self.go("log"))
+        root.add_widget(self.status)
+
+        self.sm = ScreenManager(transition=NoTransition())
+
+        # --- connection
+        self.ent_ua = inp("User-Agent", cfg.get("ua", ""))
+        self.ent_token = inp("Bearer Token", cfg.get("token", ""), password=True)
+        self.ent_vid = inp("Vendor ID", cfg.get("vid", ""))
+        b = RBtn("تست اتصال و دریافت شناسه فروشگاه")
+        b.bind(on_release=lambda *_: self.test_connection())
+        b2 = RBtn("دریافت نمونه داده‌ها (JSON)", ACC2)
+        b2.bind(on_release=lambda *_: self.dump_samples())
+        self._add("conn", page(
+            card("احراز هویت API",
+                 lab("کد یکتا (User-Agent)", MUT, 12), self.ent_ua,
+                 lab("توکن (Bearer Token)", MUT, 12), self.ent_token,
+                 lab("شناسه فروشگاه (Vendor ID)", MUT, 12), self.ent_vid, b),
+            card("عیب‌یابی و استخراج ساختار",
+                 lab("یک نمونه از کالا، سفارش و رویداد را دریافت و در کلیپ‌بورد کپی می‌کند.", MUT, 11), b2)))
+
+        # --- products
+        self.pstats = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(58), spacing=dp(8))
+        self.pcount = lab("", MUT, 12, halign="center")
+        self.pchips_sv, self.pchips = chip_row()
+        self.pdet = lab("", MUT, 11)
+        self.ent_q = inp("جستجو در نام، رنگ، ID یا کد کالا...")
+        self.ent_q.bind(text=self._on_q)
+        p1 = RBtn("دریافت و بروزرسانی لیست کالاها")
+        p1.bind(on_release=lambda *_: self.get_products())
+        p2 = RBtn("انتخاب همه", ACC2)
+        p2.bind(on_release=lambda *_: self.sel_all(True))
+        p3 = RBtn("لغو انتخاب", ACC2)
+        p3.bind(on_release=lambda *_: self.sel_all(False))
+        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
+        brow.add_widget(p2)
+        brow.add_widget(p3)
+        p4 = RBtn("ویرایش گروهی کالاهای انتخاب‌شده", (0.20, 0.45, 0.85, 1))
+        p4.bind(on_release=lambda *_: self.bulk_edit())
+        self.ent_delta = inp("5000", "5000", input_filter="int")
+        self.ent_floor = inp("0", "", input_filter="int")
+        u1 = RBtn("پیش‌نمایش و اعمال قیمت زیر نفر اول")
+        u1.bind(on_release=lambda *_: self.undercut())
+        self.ent_sku = inp("ID یا SKU کالا (مثلاً z681wQ)")
+        self.ent_stock = inp("Stock", "10", input_filter="int")
+        self.ent_price = inp("Price", "150000", input_filter="int")
+        m1 = RBtn("به‌روزرسانی سریع کالا")
+        m1.bind(on_release=lambda *_: self.update_product())
+        self.pl = vbox()
+        self.pl.spacing = dp(10)
+        self._add("prod", page(
+            card("مدیریت کالاها", p1, self.pstats, brow, p4, self.pcount, self.ent_q, self.pchips_sv, self.pdet),
+            card("قیمت‌گذاری رقابتی (زیر قیمت بای‌باکس)",
+                 lab("مبلغ کاهش نسبت به قیمت بای‌باکس (ریال/تومان)", MUT, 12), self.ent_delta,
+                 lab("کف قیمت مجاز (اختیاری)", MUT, 12), self.ent_floor, u1,
+                 lab("روی کالاهای تیک‌خورده یا تمام کالاهای «بای‌باکس ندارم» اجرا می‌شود و قبل از ارسال، پیش‌نمایش تغییرات را نشان می‌دهد.", MUT, 11)),
+            self.pl,
+            card("ویرایش دستی با شناسه کالا", self.ent_sku, self.ent_stock, self.ent_price, m1)))
+
+        # --- orders
+        self.ent_sd = inp("YYYY-MM-DD (مثلاً 2026-09-01)")
+        self.ent_ed = inp("YYYY-MM-DD (مثلاً 2026-10-15)")
+        sport re
         col = {"ok": GRN, "err": RED}.get(kind, TXT)
         rtl = bool(re.search("[\u0600-\u06FF]", text))
         t = Label(text=ts, font_name=FONT, font_size=sp(11), color=MUT, size_hint=(None, None),
