@@ -17,6 +17,11 @@ jobs:
       with:
         python-version: '3.11'
 
+    - name: Auto-Fix and Patch main.py & logic.py
+      run: |
+        python -c "import pathlib, re; p = pathlib.Path('main.py'); txt = p.read_text(encoding='utf-8', errors='ignore'); idx = txt.find('SnappShopApp().run()'); txt = txt[:idx+20] + '\n' if idx != -1 else txt; txt = txt.replace('sport re', 'import re'); p.write_text(txt, encoding='utf-8'); print('main.py cleaned, lines:', len(txt.splitlines()))"
+        python -c "import py_compile; py_compile.compile('main.py', doraise=True); py_compile.compile('logic.py', doraise=True); print('Syntax OK!')"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -34,3 +39,4 @@ jobs:
       with:
         name: SnappShop-Windows-App
         path: dist/main.exe
+        
