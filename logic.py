@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Unified logic for SnappShop GUI (main.py) and CLI bot (bot.py)."""
-import datetime
 import io
 import re
 import zipfile
@@ -136,14 +135,12 @@ def norm_prod(p, idx=0) -> Prod:
     nm, sk, pr, st = g(NAMEK), g(SKUK), g(PRICEK), g(STOCKK)
     ac, bb, rk, cp = g(ACTK), g(BBK), g(RANKK), g(COMPK)
 
-    # Direct extraction from SnappShop standard schema first
     o = Prod(p, idx)
     if p.get("title"):
         o.name = str(p["title"])
     elif nm:
         o.name = str(nm["value"])
 
-    # Extract variations (e.g. color / size)
     vars_list = p.get("variation_attributes")
     if isinstance(vars_list, list) and vars_list:
         vparts = []
@@ -162,7 +159,6 @@ def norm_prod(p, idx=0) -> Prod:
     o.price = to_num(p.get("price")) if "price" in p else (to_num(pr["value"]) if pr else None)
     o.stock = to_num(p.get("stock")) if "stock" in p else (to_num(st["value"]) if st else None)
 
-    # Discount / Special Price
     disc = p.get("discount")
     if isinstance(disc, dict):
         o.sp = to_num(disc.get("special_price"))
@@ -170,13 +166,11 @@ def norm_prod(p, idx=0) -> Prod:
         o.sp_start = str(disc.get("start_at") or "")
         o.sp_end = str(disc.get("end_at") or "")
 
-    # Reference price margins
     ref = p.get("reference_price")
     if isinstance(ref, dict):
         o.ref_min = to_num(ref.get("lower_margin"))
         o.ref_max = to_num(ref.get("upper_margin"))
 
-    # Buy-Box price (SnappShop sends numeric buy_box price in "buy_box")
     raw_bb = p.get("buy_box")
     if isinstance(raw_bb, (int, float)) and not isinstance(raw_bb, bool) and raw_bb > 1:
         o.comp = float(raw_bb)
@@ -185,7 +179,6 @@ def norm_prod(p, idx=0) -> Prod:
         o.comp = to_num(cp["value"]) if cp else None
         cp_path = cp["path"] if cp else None
 
-    # Active status
     if isinstance(p.get("active"), bool):
         o.active = p["active"]
     elif ac:
@@ -202,7 +195,6 @@ def norm_prod(p, idx=0) -> Prod:
         elif isinstance(v, (int, float)) and k in BOOL_KEYS:
             o.active = v != 0
 
-    # Explicit boolean buy_box if present
     if isinstance(raw_bb, bool):
         o.bb = raw_bb
     elif bb:
@@ -272,6 +264,217 @@ def first_array(o):
     for v in o.values():
         if isinstance(v, list) and v and isinstance(v[0], dict):
             return v
+    return None
+
+
+def calc_order_total(o: dict) -> Optional[float]:
+    if not isinstance(o, dict):
+        return None
+    fl = flat(o)
+    t = find(o, OTOTK, fl)
+    if t and to_num(t["value"]) is not None:
+        return to_num(t["value"])
+    arr = first_array(o)
+    if arr:
+        s = 0.0
+        found = False
+        for it in arr:
+            if isinstance(it, dict):
+                fp = to_num(it.get("final_price") or it.get("price") or it.get("original_price"))
+                if fp is not None:
+                    s += fp
+                    found = True
+        if found:
+            return s
+    return None
+
+
+class Order:
+    pass
+
+
+def norm_order(o, idx=0) -> Order:
+    fl = flat(o)
+    g = lambda names: find(o, names, fl)
+    nu, st, dt = g(ONUMK), g(OSTK), g(ODTK)
+    r = Order()
+    r.raw, r.i = o, idx
+    r.num = str(o.get("order_number") or (nu["value"] if nu else ""))
+    r.raw_status = str(o.get("order_status") or (st["value"] if st else ""))
+    r.status = fa_status(r.raw_status)
+    r.date = str(o.get("created_at") or (dt["value"] if dt else ""))
+    r.delivery_type = str(o.get("delivery_type") or "")
+    pk = o.get("pickup_time")
+    if isinstance(pk, dict) and (pk.get("start") or pk.get("end")):
+        r.pickup = f"{str(pk.get('start') or '')[11:16]} تا {str(pk.get('end') or '')[11:16]}"
+    else:
+        r.pickup = ""
+    items = first_array(o) or []
+    r.items_count = sum(int(to_num(i.get("quantity")) or 1) for i in items if isinstance(i, dict))
+    r.total = calc_order_total(o)
+    r.shipped = is_shipped(r.raw_status) or is_shipped(r.status)
+    r.delivered = is_delivered(r.raw_status) or is_delivered(r.status)
+    r.canceled = "CANCEL" in r.raw_status.upper() or "لغو" in r.status
+    r.snd = r.shipped and not r.delivered
+    return r
+
+
+def scalars(o, prefix="") -> Dict[str, Any]:
+    return {prefix + k: v for k, v in flat(o) if not isinstance(v, (dict, list))}
+
+
+SENS = re.compile(r"phone|mobile|\btel\b|email|national|postal|zip|latitude|longitude|\blat\b|\blng\b|address|plaque|unit", re.I)
+SENSOBJ = re.compile(r"customer|receiver|recipient|buyer|user|consignee", re.I)
+PRI = re.compile(r"number|order.?id|date|created|status|title|name|sku|qty|quantity|count|price|total|amount|fee|commission|discount", re.I)
+
+
+def sales_rows(orders: List[dict], prod_map: Optional[Dict[str, str]] = None):
+    rows = []
+    for o in orders:
+        base = scalars(o)
+        if "order_total" not in base:
+            tot = calc_order_total(o)
+            if tot is not None:
+                base["total_price"] = int(tot)
+        arr = first_array(o)
+        if arr:
+            for it in arr:
+                r = dict(base)
+                isc = scalars(it, "item.")
+                if prod_map and not isc.get("item.title"):
+                    pid = str(it.get("inventory_product_id") or it.get("id") or it.get("sku") or it.get("product_number") or "")
+                    if pid in prod_map:
+                        isc["item.title"] = prod_map[pid]
+                r.update(isc)
+                rows.append(r)
+        else:
+            rows.append(base)
+    cols, seen = [], set()
+    for r in rows:
+        for k in r:
+            if k not in seen:
+                seen.add(k)
+                cols.append(k)
+    cols = [c for c in cols if PRI.search(c)] + [c for c in cols if not PRI.search(c)]
+    cols = [c for c in cols if not SENS.search(c)][:60]
+    return cols, rows
+
+
+# ---------------- xlsx ----------------
+_CTRL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _x(s) -> str:
+    return escape(_CTRL.sub("", str(s)), {'"': "&quot;"})
+
+
+def _col(i: int) -> str:
+    s, i = "", i + 1
+    while i > 0:
+        m = (i - 1) % 26
+        s = chr(65 + m) + s
+        i = (i - 1) // 26
+    return s
+
+
+def _sheet_xml(cols, rows) -> str:
+    NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    H = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    sd = [H, f'<worksheet xmlns="{NS}"><sheetViews><sheetView rightToLeft="1" workbookViewId="0">'
+             '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>']
+    for i, c in enumerate(cols):
+        sd.append(f'<col min="{i+1}" max="{i+1}" width="{min(42, max(12, len(str(c)) + 5))}" customWidth="1"/>')
+    sd.append('</cols><sheetData><row r="1">')
+    for i, c in enumerate(cols):
+        sd.append(f'<c r="{_col(i)}1" s="1" t="inlineStr"><is><t>{_x(c)}</t></is></c>')
+    sd.append("</row>")
+    for ri, r in enumerate(rows):
+        sd.append(f'<row r="{ri+2}">')
+        for ci, c in enumerate(cols):
+            v = r.get(c)
+            if v is None or v == "":
+                continue
+            ref = f"{_col(ci)}{ri+2}"
+            if isinstance(v, bool):
+                sd.append(f'<c r="{ref}" t="b"><v>{1 if v else 0}</v></c>')
+            elif isinstance(v, (int, float)):
+                sd.append(f'<c r="{ref}"><v>{v}</v></c>')
+            else:
+                sd.append(f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{_x(v)}</t></is></c>')
+        sd.append("</row>")
+    sd.append("</sheetData></worksheet>")
+    return "".join(sd)
+
+
+def make_xlsx_multi(sheets) -> bytes:
+    NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    H = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    n = len(sheets)
+    ct = "".join(f'<Override PartName="/xl/worksheets/sheet{i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for i in range(n))
+    sh = "".join(f'<sheet name="{_x(s[0])[:31]}" sheetId="{i+1}" r:id="rId{i+1}"/>' for i, s in enumerate(sheets))
+    rel = "".join(f'<Relationship Id="rId{i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i+1}.xml"/>' for i in range(n))
+    rel += f'<Relationship Id="rId{n+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    files = {
+        "[Content_Types].xml": H + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + ct + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
+        "_rels/.rels": H + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": H + f'<workbook xmlns="{NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{sh}</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": H + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rel + '</Relationships>',
+        "xl/styles.xml": H + f'<styleSheet xmlns="{NS}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
+    }
+    for i, (_name, cols, rows) in enumerate(sheets):
+        files[f"xl/worksheets/sheet{i+1}.xml"] = _sheet_xml(cols, rows)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def make_xlsx(cols, rows, sheet="Sales") -> bytes:
+    return make_xlsx_multi([(sheet, cols, rows)])
+
+
+# ---------------- sales summaries (accounting) ----------------
+ITSKUK = ["inventoryproductid", "sku", "vendorsku", "sellersku", "productnumber", "productcode", "code", "id"]
+ITNAMEK = ["title", "name", "productname", "producttitle"]
+QTYK = ["quantity", "qty", "count", "deliverablequantity"]
+UPK = ["finalprice", "price", "unitprice", "sellingprice", "originalprice", "unitamount", "amount"]
+FA_HEAD = {
+    "ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش",
+    "orderstatus": "وضعیت سفارش", "status": "وضعیت", "deliverytype": "نوع ارسال",
+    "createdat": "تاریخ ثبت", "orderdate": "تاریخ", "date": "تاریخ",
+    "total": "مبلغ کل", "totalprice": "مبلغ کل", "finalprice": "مبلغ نهایی",
+    "originalprice": "قیمت اصلی", "discountamount": "مبلغ تخفیف",
+    "sku": "کد کالا", "inventoryproductid": "شناسه کالا", "productnumber": "شماره کالا",
+    "title": "نام کالا", "name": "نام کالا", "quantity": "تعداد", "qty": "تعداد",
+    "canceledquantity": "تعداد لغوشده", "price": "قیمت واحد", "count": "تعداد",
+}
+
+
+def fa_header(col: str) -> str:
+    tail = norm(col.split(".")[-1])
+    base = FA_HEAD.get(tail)
+    if not base:
+        return col
+    return ("کالا: " + base) if col.startswith("item.") else base
+
+
+def sales_summary(orders: List[dict], prod_map: Optional[Dict[str, str]] = None):
+    by_sku: Dict[str, dict] = {}
+    by_day: Dict[str, dict] = {}
+    for o in orders:
+        total = calc_order_total(o)
+        d = find(o, ODTK)
+        day = str(o.get("created_at") or (d["value"] if d else "؟"))[:10]
+        nu = find(o, ONUMK)
+        num = str(o.get("order_number") or (nu["value"] if nu else ""))
+        rec = by_day.setdefault(day, {"تاریخ": day, "تعداد سفارش": 0, "جمع فروش": 0})
+        rec["تعداد سفارش"] += 1
+        rec["جمع فروش"] += int(total or 0)
+        for it in first_array(o) or []:
+            sk, nm = find(it, ITSKUK), find(it, ITNAMEK)
+            q, p = find(it, QTYK), find(it, UPK)
+            key = str(it.get("inventory_produ       return v
     return None
 
 
