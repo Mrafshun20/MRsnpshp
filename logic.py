@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Pure logic shared by the Android app and the Windows bot (no Kivy, no network).
-Built on the official SnappShop vendor API (v2.1.2) field names."""
-import datetime
+"""Pure logic (no Kivy): field detection, order classification, Excel export, redaction."""
 import io
 import re
 import zipfile
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape
+
+# ---------------- helpers ----------------
+def norm(s) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
 def to_num(v) -> Optional[float]:
@@ -36,208 +38,195 @@ def flat(o, pre="", out=None, d=0):
     return out
 
 
-# ---------------- redaction (for sample dumps) ----------------
-SENS = re.compile(r"phone|mobile|\btel\b|email|national|postal|zip|latitude|longitude|\blat\b|\blng\b|address|plaque", re.I)
-SENSOBJ = re.compile(r"customer|receiver|recipient|buyer|user|consignee", re.I)
+def find(o, names, fl=None):
+    if fl is None:
+        fl = flat(o)
+    for name in names:
+        best = None
+        for path, val in fl:
+            seg = path.split(".")
+            if norm(seg[-1]) != name or val is None or isinstance(val, (dict, list)):
+                continue
+            if best is None or len(seg) < best[2]:
+                best = (path, val, len(seg))
+        if best:
+            return {"path": best[0], "value": best[1]}
+    return None
 
 
-def redact(o, hide=False):
-    if isinstance(o, list):
-        return [redact(x, hide) for x in o]
-    if isinstance(o, dict):
-        return {k: redact(v, hide or bool(SENSOBJ.search(k)) or bool(SENS.search(k))) for k, v in o.items()}
-    if hide and isinstance(o, str):
-        return "***"
-    if hide and isinstance(o, (int, float)) and not isinstance(o, bool):
-        return 0
+NAMEK = ["title", "name", "productname", "producttitle", "titlefa", "namefa"]
+SKUK = ["sku", "vendorsku", "sellersku", "productcode", "code", "id"]
+PRICEK = ["price", "sellingprice", "saleprice", "finalprice", "currentprice"]
+STOCKK = ["stock", "quantity", "inventory", "qty", "stockcount", "availablestock"]
+ACTK = ["active", "isactive", "enabled", "isenabled", "status", "state", "visible", "isvisible"]
+BBK = ["buybox", "isbuybox", "hasbuybox", "buyboxwinner", "isbuyboxwinner", "winbuybox", "isbuyboxowner", "iswinner"]
+RANKK = ["rank", "position", "buyboxrank", "sellerrank"]
+COMPK = ["buyboxprice", "lowestprice", "lowestcompetitorprice", "competitorprice", "bestprice", "firstprice",
+         "lowestsellerprice", "buyboxwinnerprice", "topprice", "minimumcompetitorprice"]
+INACT_RE = re.compile(r"inactive|deactiv|disabled?|draft|hidden|archiv|stopped|suspend|غیر\s*فعال|غیرفعال|متوقف|مخفی", re.I)
+BOOL_KEYS = {"active", "isactive", "enabled", "isenabled", "visible", "isvisible"}
+
+
+class Prod:
+    def __init__(self, raw, idx):
+        self.raw = raw
+        self.i = idx
+        self.sel = False
+        self.name = "(بدون نام)"
+        self.sku = ""
+        self.price = None
+        self.stock = None
+        self.comp = None
+        self.active = None
+        self.bb = None
+        self.inactive = self.oos = self.lose = False
+        self.det: Dict[str, Optional[str]] = {}
+
+    def calc(self):
+        self.inactive = self.active is False
+        self.oos = self.stock is not None and self.stock <= 0
+        lose = False
+        if self.bb is False:
+            lose = True
+        elif self.bb is not True and self.comp is not None and self.price is not None and self.price > self.comp:
+            lose = True
+        self.lose = lose
+
+
+def norm_prod(p, idx) -> Prod:
+    fl = flat(p)
+    g = lambda names: find(p, names, fl)
+    nm, sk, pr, st = g(NAMEK), g(SKUK), g(PRICEK), g(STOCKK)
+    ac, bb, rk, cp = g(ACTK), g(BBK), g(RANKK), g(COMPK)
+    if not cp:
+        for path, val in fl:
+            lp, ls = norm(path), norm(path.split(".")[-1])
+            if ("." in path and re.search(r"buybox|lowest|competitor|firstseller|topseller|bestoffer", lp)
+                    and re.fullmatch(r"price|sellingprice|amount|value|finalprice", ls)
+                    and val is not None and not isinstance(val, (dict, list))):
+                cp = {"path": path, "value": val}
+                break
+    o = Prod(p, idx)
+    if nm:
+        o.name = str(nm["value"])
+    if sk:
+        o.sku = str(sk["value"])
+    o.price = to_num(pr["value"]) if pr else None
+    o.stock = to_num(st["value"]) if st else None
+    o.comp = to_num(cp["value"]) if cp else None
+    if ac:
+        v, k = ac["value"], norm(ac["path"].split(".")[-1])
+        if isinstance(v, bool):
+            o.active = v
+        elif isinstance(v, str):
+            if v == "true":
+                o.active = True
+            elif v == "false":
+                o.active = False
+            elif k in ("status", "state"):
+                o.active = not INACT_RE.search(v)
+        elif isinstance(v, (int, float)) and k in BOOL_KEYS:
+            o.active = v != 0
+    if bb:
+        b = bb["value"]
+        if isinstance(b, bool):
+            o.bb = b
+        elif b == "true" or b == 1:
+            o.bb = True
+        elif b == "false" or b == 0:
+            o.bb = False
+    if o.bb is None and rk and to_num(rk["value"]) is not None:
+        o.bb = to_num(rk["value"]) == 1
+    o.calc()
+    o.det = {"نام": nm and nm["path"], "کد": sk and sk["path"], "قیمت": pr and pr["path"],
+             "موجودی": st and st["path"], "فعال/غیرفعال": ac and ac["path"],
+             "بای‌باکس": (bb and bb["path"]) or (rk and rk["path"]), "قیمت نفر اول": cp and cp["path"]}
     return o
 
 
-# ---------------- Jalali (Persian) dates ----------------
-def g2j(gy: int, gm: int, gd: int):
-    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-    gy2 = gy + 1 if gm > 2 else gy
-    days = 355666 + 365 * gy + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400 + gd + g_d_m[gm - 1]
-    jy = -1595 + 33 * (days // 12053)
-    days %= 12053
-    jy += 4 * (days // 1461)
-    days %= 1461
-    if days > 365:
-        jy += (days - 1) // 365
-        days = (days - 1) % 365
-    if days < 186:
-        jm, jd = 1 + days // 31, 1 + days % 31
-    else:
-        jm, jd = 7 + (days - 186) // 30, 1 + (days - 186) % 30
-    return jy, jm, jd
+# ---------------- orders ----------------
+ONUMK = ["ordernumber", "number", "orderid", "ordercode", "code", "id"]
+OSTK = ["status", "orderstatus", "statustitle", "statusname", "statuslabel", "state"]
+ODTK = ["createdat", "orderdate", "placedat", "createdon", "createddate", "ordereddate", "date"]
+OTOTK = ["total", "totalprice", "totalamount", "payable", "payableamount", "grandtotal", "amount", "finalprice"]
 
 
-def jdate(s: str) -> str:
-    """'2026-10-12 17:51:47' -> '1405/07/20'"""
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(s or ""))
-    if not m:
-        return ""
-    y, mo, d = g2j(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    return f"{y:04d}/{mo:02d}/{d:02d}"
+def is_shipped(s: str) -> bool:
+    return bool(re.search(r"ship|sent|dispatch|handover|transit|post|ارسال|پست|در\s*راه|پیک", s, re.I)) and \
+        not re.search(r"نشده|not\s*(yet\s*)?(sent|shipped)|unshipped|unsent", s, re.I)
 
 
-ORDER_STATUS_FA = {"CONFIRMED": "تأیید شده", "CANCELED": "لغو شده", "CANCELLED": "لغو شده"}
-EVENT_FA = {"NEW_ORDER": "سفارش جدید", "CANCELLATION": "لغو کالا", "CHANGE_STATUS": "تغییر وضعیت"}
+def is_delivered(s: str) -> bool:
+    return bool(re.search(r"\bdelivered\b|received|\bcomplete(d)?\b|finished|تحویل\s*مشتری|تحویل\s*شد|تحویل\s*داده\s*شد|تکمیل|دریافت\s*شده", s, re.I)) and \
+        not re.search(r"undelivered|not\s*delivered|نشده", s, re.I)
 
 
-def status_fa(s: str) -> str:
-    return ORDER_STATUS_FA.get(str(s).upper(), str(s))
-
-
-# ---------------- products ----------------
-class Prod:
-    def __init__(self, raw: dict, i: int):
-        g = raw.get
-        self.raw, self.i, self.sel = raw, i, False
-        self.id = str(g("id") or "")
-        self.sku = str(g("sku")) if g("sku") not in (None, "") else ""
-        self.name = str(g("title") or g("title_en") or "(بدون نام)")
-        self.pnum = str(g("product_number") or "")
-        self.price = to_num(g("price"))
-        self.stock = to_num(g("stock"))
-        self.wstock = to_num(g("warehouse_stock"))
-        self.active = g("active") if isinstance(g("active"), bool) else None
-        self.capacity = g("capacity")
-        d = g("discount") if isinstance(g("discount"), dict) else {}
-        self.sp = to_num(d.get("special_price"))
-        self.sp_start = str(d.get("start_at") or "")
-        self.sp_end = str(d.get("end_at") or "")
-        self.sp_stock = to_num(d.get("stock"))
-        self.sp_pct = to_num(d.get("percent"))
-
-    @property
-    def key(self) -> str:
-        return self.sku or self.id
-
-    def has_discount(self, today: str) -> bool:
-        return self.sp is not None and self.sp > 0 and (not self.sp_end or self.sp_end[:10] >= today)
-
-    def item(self, price=None, stock=None, **extra) -> dict:
-        """PATCH item: id|sku + stock + price are mandatory in the API."""
-        p = self.price if price is None else price
-        s = self.stock if stock is None else stock
-        if p is None or s is None:
-            raise ValueError("price/stock unknown")
-        it = {"sku": self.sku} if self.sku else {"id": self.id}
-        it["price"], it["stock"] = int(p), int(s)
-        it.update(extra)
-        return it
-
-
-def norm_prod(raw: dict, i: int = 0) -> Prod:
-    return Prod(raw, i)
-
-
-FILTERS = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"),
-           ("low", "کم‌موجودی"), ("oos", "ناموجود"), ("disc", "دارای تخفیف")]
-
-
-def match(o: Prod, key: str, low: int, today: str) -> bool:
-    if key == "all":
-        return True
-    if key == "active":
-        return o.active is True
-    if key == "inactive":
-        return o.active is False
-    if key == "instock":
-        return o.stock is not None and o.stock > 0
-    if key == "low":
-        return o.stock is not None and 0 < o.stock <= low
-    if key == "oos":
-        return o.stock is not None and o.stock <= 0
-    if key == "disc":
-        return o.has_discount(today)
-    return True
-
-
-def plan_bulk(prods: List[Prod], pct=None, amt=None, stock=None):
-    """Returns (changes, skipped). changes: [(prod, new_price, new_stock)]."""
-    changes, skipped = [], 0
-    for o in prods:
-        if o.price is None or o.stock is None:
-            skipped += 1
-            continue
-        np_ = o.price
-        if pct is not None:
-            np_ *= 1 + pct / 100
-        if amt is not None:
-            np_ += amt
-        np_ = int(round(np_))
-        ns = int(stock) if stock is not None else int(o.stock)
-        if np_ <= 0:
-            skipped += 1
-            continue
-        if np_ != int(o.price) or ns != int(o.stock):
-            changes.append((o, np_, ns))
-    return changes, skipped
-
-
-def plan_discount(prods: List[Prod], pct: float, start: str, end: str, dstock=None):
-    """Percent-off campaign using special_price (+ start/end dates, YYYY-MM-DD Gregorian)."""
-    out, skipped = [], 0
-    for o in prods:
-        if o.price is None or o.stock is None:
-            skipped += 1
-            continue
-        sp = int(round(o.price * (1 - pct / 100)))
-        if sp <= 0 or sp >= o.price:
-            skipped += 1
-            continue
-        ds = int(dstock) if dstock is not None else int(o.stock)
-        out.append((o, o.item(special_price=sp, special_price_start_at=start,
-                              special_price_end_at=end, special_price_stock=ds)))
-    return out, skipped
-
-
-def summarize_patch(results: List[dict]):
-    """(ok_count, [(key, message)]) from PATCH response data."""
-    ok, bad = 0, []
-    for r in results or []:
-        if r.get("status") is False:
-            bad.append((r.get("sku") or r.get("id") or "?", "; ".join(str(m) for m in (r.get("messages") or [])) or "failed"))
-        else:
-            ok += 1
-    return ok, bad
-
-
-# ---------------- orders / events ----------------
 class Order:
-    def __init__(self, raw: dict, i: int):
-        g = raw.get
-        self.raw, self.i = raw, i
-        self.num = str(g("order_number") or "")
-        self.status = str(g("order_status") or "")
-        self.created = str(g("created_at") or "")
-        self.delivery = str(g("delivery_type") or "")
-        pt = g("pickup_time") if isinstance(g("pickup_time"), dict) else {}
-        self.pickup_start, self.pickup_end = str(pt.get("start") or ""), str(pt.get("end") or "")
-        self.items = [it for it in (g("items") or []) if isinstance(it, dict)]
-        self.total = sum(to_num(it.get("final_price")) or 0 for it in self.items)
-        self.prep = self.status.upper() == "CONFIRMED"
-        self.canceled = self.status.upper() in ("CANCELED", "CANCELLED")
+    pass
 
 
-def norm_order(raw: dict, i: int = 0) -> Order:
-    return Order(raw, i)
+def norm_order(o, idx) -> Order:
+    fl = flat(o)
+    g = lambda names: find(o, names, fl)
+    nu, st, dt, to = g(ONUMK), g(OSTK), g(ODTK), g(OTOTK)
+    r = Order()
+    r.raw, r.i = o, idx
+    r.num = str(nu["value"]) if nu else ""
+    r.status = str(st["value"]) if st else ""
+    r.date = str(dt["value"]) if dt else ""
+    r.total = to_num(to["value"]) if to else None
+    r.shipped, r.delivered = is_shipped(r.status), is_delivered(r.status)
+    r.snd = r.shipped and not r.delivered
+    return r
 
 
-def event_line(e: dict) -> str:
-    t = str(e.get("event_type") or "")
-    num = e.get("order_number")
-    items = e.get("items") or []
-    total = sum(to_num(it.get("final_price")) or 0 for it in items if isinstance(it, dict))
-    extra = f" | {len(items)} items | {int(total):,}" if t == "NEW_ORDER" and items else ""
-    if t == "CHANGE_STATUS":
-        extra = f" -> {e.get('new_status')}"
-    return f"{t} order {num} at {e.get('event_at')}{extra}"
+def first_array(o):
+    pref = ["items", "products", "lines", "orderitems", "cartitems", "skus", "details"]
+    if not isinstance(o, dict):
+        return None
+    for name in pref:
+        for k, v in o.items():
+            if norm(k) == name and isinstance(v, list) and v and isinstance(v[0], dict):
+                return v
+    for v in o.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return v
+    return None
 
 
-# ---------------- Excel report ----------------
+def scalars(o, prefix="") -> Dict[str, Any]:
+    return {prefix + k: v for k, v in flat(o) if not isinstance(v, (dict, list))}
+
+
+SENS = re.compile(r"phone|mobile|\btel\b|email|national|postal|zip|latitude|longitude|\blat\b|\blng\b|address|plaque|unit", re.I)
+SENSOBJ = re.compile(r"customer|receiver|recipient|buyer|user|consignee", re.I)
+PRI = re.compile(r"number|order.?id|date|created|status|title|name|sku|qty|quantity|count|price|total|amount|fee|commission|discount", re.I)
+
+
+def sales_rows(orders: List[dict]):
+    rows = []
+    for o in orders:
+        base = scalars(o)
+        arr = first_array(o)
+        if arr:
+            for it in arr:
+                r = dict(base)
+                r.update(scalars(it, "item."))
+                rows.append(r)
+        else:
+            rows.append(base)
+    cols, seen = [], set()
+    for r in rows:
+        for k in r:
+            if k not in seen:
+                seen.add(k)
+                cols.append(k)
+    cols = [c for c in cols if PRI.search(c)] + [c for c in cols if not PRI.search(c)]
+    cols = [c for c in cols if not SENS.search(c)][:60]
+    return cols, rows
+
+
+# ---------------- xlsx ----------------
 _CTRL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
@@ -312,73 +301,169 @@ def make_xlsx(cols, rows, sheet="Sales") -> bytes:
     return make_xlsx_multi([(sheet, cols, rows)])
 
 
-SALES_COLS = [("order_number", "شماره سفارش"), ("date", "تاریخ میلادی"), ("jdate", "تاریخ شمسی"), ("time", "ساعت"),
-              ("order_status", "وضعیت سفارش"), ("delivery_type", "نوع ارسال"), ("item_status", "وضعیت آیتم"),
-              ("sku", "کد فروشنده (SKU)"), ("title", "نام کالا"), ("product_number", "شماره محصول"),
-              ("quantity", "تعداد"), ("canceled_quantity", "لغو شده"), ("net_quantity", "تعداد خالص"),
-              ("original_price", "قیمت اصلی"), ("discount_amount", "تخفیف"), ("final_price", "قیمت نهایی")]
+# ---------------- sales summaries (accounting) ----------------
+ITSKUK = ["sku", "vendorsku", "sellersku", "productcode", "code", "id"]
+ITNAMEK = ["title", "name", "productname", "producttitle"]
+QTYK = ["quantity", "qty", "count"]
+UPK = ["price", "unitprice", "sellingprice", "finalprice", "unitamount", "amount"]
+FA_HEAD = {"ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش", "status": "وضعیت",
+           "createdat": "تاریخ", "orderdate": "تاریخ", "date": "تاریخ", "total": "مبلغ کل", "totalprice": "مبلغ کل",
+           "sku": "کد کالا", "title": "نام", "name": "نام", "quantity": "تعداد", "qty": "تعداد", "price": "قیمت واحد",
+           "count": "تعداد"}
 
 
-def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None, low: int = 3) -> bytes:
-    by_pn = {p.pnum: p for p in (prods or []) if p.pnum}
-    by_id = {p.id: p for p in (prods or []) if p.id}
-    rows, by_sku, by_day = [], {}, {}
+def fa_header(col: str) -> str:
+    tail = norm(col.split(".")[-1])
+    base = FA_HEAD.get(tail)
+    if not base:
+        return col
+    return ("کالا: " + base) if col.startswith("item.") else base
+
+
+def sales_summary(orders: List[dict]):
+    by_sku: Dict[str, dict] = {}
+    by_day: Dict[str, dict] = {}
     for o in orders:
-        num = o.get("order_number")
-        created = str(o.get("created_at") or "")
-        day = created[:10]
-        status = str(o.get("order_status") or "")
-        dd = by_day.setdefault(day, {"orders": set(), "canceled": set(), "net": 0.0, "rev": 0.0, "cq": 0.0})
-        dd["orders"].add(num)
-        if status.upper() in ("CANCELED", "CANCELLED"):
-            dd["canceled"].add(num)
-        for it in (o.get("items") or [{}]):
-            q = to_num(it.get("quantity")) or 0
-            cq = to_num(it.get("canceled_quantity")) or 0
-            p = by_pn.get(str(it.get("product_number") or "")) or by_id.get(str(it.get("vendor_product_info_id") or ""))
-            sku = it.get("sku") or (p.sku if p else "") or ""
-            fp = to_num(it.get("final_price")) or 0
-            row = {"order_number": num, "date": day, "jdate": jdate(created), "time": created[11:19],
-                   "order_status": status_fa(status), "delivery_type": o.get("delivery_type"),
-                   "item_status": status_fa(it.get("item_status") or ""), "sku": sku,
-                   "title": p.name if p else "", "product_number": it.get("product_number"),
-                   "quantity": q, "canceled_quantity": cq, "net_quantity": q - cq,
-                   "original_price": to_num(it.get("original_price")), "discount_amount": to_num(it.get("discount_amount")),
-                   "final_price": fp}
-            rows.append({lab: row[k] for k, lab in SALES_COLS})
-            key = sku or str(it.get("product_number") or "؟")
-            s = by_sku.setdefault(key, {"کد کالا": key, "نام کالا": p.name if p else "", "تعداد خالص": 0.0,
-                                        "جمع قیمت نهایی": 0.0, "_o": set()})
-            s["تعداد خالص"] += q - cq
-            s["جمع قیمت نهایی"] += fp
-            s["_o"].add(num)
-            dd["net"] += q - cq
-            dd["rev"] += fp
-            dd["cq"] += cq
-    sku_rows = [{"کد کالا": s["کد کالا"], "نام کالا": s["نام کالا"], "تعداد خالص": s["تعداد خالص"],
-                 "جمع قیمت نهایی": s["جمع قیمت نهایی"], "تعداد سفارش": len(s["_o"])}
-                for s in sorted(by_sku.values(), key=lambda x: -x["جمع قیمت نهایی"])]
-    day_rows = [{"تاریخ میلادی": d, "تاریخ شمسی": jdate(d), "تعداد سفارش": len(v["orders"]),
-                 "تعداد سفارش لغوشده": len(v["canceled"]), "تعداد کالای خالص": v["net"],
-                 "تعداد کالای لغوشده": v["cq"], "جمع قیمت نهایی": v["rev"]} for d, v in sorted(by_day.items())]
-    sheets = [
-        ("ریز فروش", [lab for _k, lab in SALES_COLS], rows),
-        ("خلاصه کالا", ["کد کالا", "نام کالا", "تعداد خالص", "جمع قیمت نهایی", "تعداد سفارش"], sku_rows),
-        ("خلاصه روزانه", ["تاریخ میلادی", "تاریخ شمسی", "تعداد سفارش", "تعداد سفارش لغوشده", "تعداد کالای خالص",
-                          "تعداد کالای لغوشده", "جمع قیمت نهایی"], day_rows),
-    ]
-    if prods:
-        lows = [{"کد": p.key, "نام کالا": p.name, "موجودی": p.stock, "موجودی انبار اسنپ": p.wstock,
-                 "فعال": "بله" if p.active else "خیر"}
-                for p in prods if p.active is not False and p.stock is not None and p.stock <= low]
-        sheets.append(("کم‌موجودی", ["کد", "نام کالا", "موجودی", "موجودی انبار اسنپ", "فعال"], lows))
-    return make_xlsx_multi(sheets)
+        t = find(o, OTOTK)
+        total = to_num(t["value"]) if t else None
+        d = find(o, ODTK)
+        day = str(d["value"])[:10] if d else "؟"
+        nu = find(o, ONUMK)
+        num = str(nu["value"]) if nu else ""
+        rec = by_day.setdefault(day, {"تاریخ": day, "تعداد سفارش": 0, "جمع فروش": 0.0})
+        rec["تعداد سفارش"] += 1
+        rec["جمع فروش"] += total or 0
+        for it in first_array(o) or []:
+            sk, nm = find(it, ITSKUK), find(it, ITNAMEK)
+            q, p = find(it, QTYK), find(it, UPK)
+            key = str(sk["value"]) if sk else "؟"
+            qty = to_num(q["value"]) if q else 1
+            qty = 1 if qty is None else qty
+            price = to_num(p["value"]) if p else None
+            r = by_sku.setdefault(key, {"کد کالا": key, "نام": str(nm["value"]) if nm else "", "تعداد": 0,
+                                        "جمع فروش": 0.0, "_orders": set()})
+            r["تعداد"] += qty
+            r["جمع فروش"] += qty * price if price is not None else 0
+            r["_orders"].add(num)
+    sku_rows = []
+    for r in sorted(by_sku.values(), key=lambda x: -x["جمع فروش"]):
+        sku_rows.append({"کد کالا": r["کد کالا"], "نام": r["نام"], "تعداد": r["تعداد"],
+                         "جمع فروش": r["جمع فروش"], "تعداد سفارش": len(r["_orders"])})
+    day_rows = [by_day[k] for k in sorted(by_day)]
+    return sku_rows, day_rows
 
 
-def products_export_rows(prods: List[Prod]):
-    cols = ["sku", "id", "title", "price", "stock", "warehouse_stock", "active", "special_price",
-            "special_start", "special_end", "special_stock"]
-    rows = [{"sku": p.sku, "id": p.id, "title": p.name, "price": p.price, "stock": p.stock,
-             "warehouse_stock": p.wstock, "active": p.active, "special_price": p.sp,
-             "special_start": p.sp_start, "special_end": p.sp_end, "special_stock": p.sp_stock} for p in prods]
-    return cols, rows
+def build_sales_workbook(orders: List[dict]) -> bytes:
+    cols, rows = sales_rows(orders)
+    head = {c: fa_header(c) for c in cols}
+    drows = [{head[c]: r.get(c) for c in cols} for r in rows]
+    sku_rows, day_rows = sales_summary(orders)
+    return make_xlsx_multi([
+        ("ریز سفارشات", [head[c] for c in cols], drows),
+        ("خلاصه کالا", ["کد کالا", "نام", "تعداد", "جمع فروش", "تعداد سفارش"], sku_rows),
+        ("خلاصه روزانه", ["تاریخ", "تعداد سفارش", "جمع فروش"], day_rows),
+    ])
+
+
+# ---------------- redaction ----------------
+def redact(o, hide=False):
+    if isinstance(o, list):
+        return [redact(x, hide) for x in o]
+    if isinstance(o, dict):
+        return {k: redact(v, hide or bool(SENSOBJ.search(k)) or bool(SENS.search(k))) for k, v in o.items()}
+    if hide and isinstance(o, str):
+        return "***"
+    if hide and isinstance(o, (int, float)) and not isinstance(o, bool):
+        return 0
+    return o
+
+
+# ---------------- undercut plan ----------------
+def plan_undercut(products: List[Prod], delta: int, floor: int):
+    """Returns (rows, skipped). rows: dicts {o, np, why}."""
+    sel = [o for o in products if o.sel]
+    base = sel if sel else [o for o in products if o.lose]
+    rows, skipped = [], 0
+    for o in base:
+        if o.comp is None or o.price is None or not o.sku:
+            skipped += 1
+            continue
+        np_ = int(o.comp - delta)
+        why = ""
+        if np_ <= 0:
+            why = "قیمت نامعتبر"
+        elif floor and np_ < floor:
+            why = "زیر حداقل مجاز"
+        elif np_ >= o.price:
+            why = "قیمت شما از قبل پایین‌تر است"
+        rows.append({"o": o, "np": np_, "why": why})
+    return rows, skipped
+
+
+# ---------------- automatic repricing ----------------
+def plan_auto(products: List[Prod], delta: int, mins: Dict[str, float], max_drop_pct: float = 15.0,
+              require_min: bool = True):
+    """Safe automatic undercut. Returns (changes, skips).
+    changes: [{sku,name,old,new,comp}]; skips: {reason: [sku,...]}"""
+    changes, skips = [], {}
+    def skip(why, sku):
+        skips.setdefault(why, []).append(sku)
+    for o in products:
+        if not o.lose:
+            continue
+        if o.inactive or o.oos:
+            skip("غیرفعال/ناموجود", o.sku)
+            continue
+        if o.comp is None or o.price is None or not o.sku:
+            skip("قیمت نفر اول نامشخص", o.sku)
+            continue
+        np_ = int(o.comp - delta)
+        if np_ <= 0:
+            skip("قیمت نامعتبر", o.sku)
+            continue
+        if np_ >= o.price:
+            skip("قیمت شما از قبل پایین‌تر است", o.sku)
+            continue
+        floor = mins.get(o.sku)
+        if floor is None and require_min:
+            skip("بدون حداقل قیمت", o.sku)
+            continue
+        if floor is not None and np_ < floor:
+            skip("زیر حداقل قیمت", o.sku)
+            continue
+        if max_drop_pct and (o.price - np_) / o.price * 100 > max_drop_pct:
+            skip("افت قیمت بیش از حد مجاز", o.sku)
+            continue
+        changes.append({"sku": o.sku, "name": o.name, "old": int(o.price), "new": np_, "comp": int(o.comp)})
+    return changes, skips
+
+
+def read_mins_csv(path: str) -> Dict[str, float]:
+    import csv
+    out: Dict[str, float] = {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return out
+    head = [norm(h) for h in rows[0]]
+    si = next((i for i, h in enumerate(head) if h in ("sku", "code", "id")), 0)
+    mi = next((i for i, h in enumerate(head) if "min" in h), None)
+    if mi is None:
+        mi = 1 if len(head) > 1 else 0
+    for r in rows[1:]:
+        if len(r) <= max(si, mi):
+            continue
+        v = to_num(r[mi])
+        if r[si].strip() and v is not None and v > 0:
+            out[r[si].strip()] = v
+    return out
+
+
+def write_mins_csv(path: str, products: List[Prod], mins: Dict[str, float]):
+    import csv
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["sku", "name", "price", "competitor_price", "min_price"])
+        for o in products:
+            w.writerow([o.sku, o.name, "" if o.price is None else int(o.price),
+                        "" if o.comp is None else int(o.comp), "" if o.sku not in mins else int(mins[o.sku])])
