@@ -3,6 +3,7 @@ name: Build Windows App
 on:
   push:
     branches: [ main, master ]
+    paths-ignore: [ "buildozer.spec", ".github/workflows/build.yml", ".github/workflows/bot-windows.yml" ]
   workflow_dispatch:
 
 permissions:
@@ -12,358 +13,34 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 30
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Unify logic.py, bot.py, main.py, and buildozer.spec
-      shell: python
-      run: |
-        import ast, pathlib, py_compile
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pyinstaller kivy==2.3.0 arabic-reshaper python-bidi==0.4.2 certifi pillow
 
-        # =====================================================================
-        # 1. Fix logic.py (Persian headers + missing bot.py helpers & Prod attrs)
-        # =====================================================================
-        p_logic = pathlib.Path("logic.py")
-        lg = p_logic.read_text(encoding="utf-8").replace("\r\n", "\n")
+      - name: Compile check
+        run: python -m py_compile main.py logic.py core.py bot.py
 
-        # Expand Persian headers dictionary for SnappShop orders/items
-        old_fa_head = '''FA_HEAD = {"ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش", "status": "وضعیت",
-                   "createdat": "تاریخ", "orderdate": "تاریخ", "date": "تاریخ", "total": "مبلغ کل", "totalprice": "مبلغ کل",
-                   "sku": "کد کالا", "title": "نام", "name": "نام", "quantity": "تعداد", "qty": "تعداد", "price": "قیمت واحد",
-                   "count": "تعداد"}'''
+      - name: Build EXE
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name SnappShop \
+            --add-data "DejaVuSans.ttf;." --add-data "DejaVuSans-Bold.ttf;." --add-data "icon.png;." \
+            --collect-data certifi --hidden-import bot --hidden-import winsound main.py
 
-        new_fa_head = '''FA_HEAD = {
-            "ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش", "ordercode": "کد سفارش",
-            "id": "شناسه", "code": "کد", "status": "وضعیت سفارش", "orderstatus": "وضعیت سفارش",
-            "statustitle": "وضعیت سفارش", "statusname": "وضعیت سفارش", "state": "وضعیت",
-            "createdat": "تاریخ ثبت", "orderdate": "تاریخ سفارش", "placedat": "زمان ثبت", "date": "تاریخ",
-            "updatedat": "آخرین بروزرسانی", "deliverydate": "تاریخ تحویل", "shippingdate": "تاریخ ارسال",
-            "total": "مبلغ کل (تومان)", "totalprice": "مبلغ کل (تومان)", "totalamount": "مبلغ کل (تومان)",
-            "payable": "مبلغ قابل پرداخت (تومان)", "payableamount": "مبلغ قابل پرداخت (تومان)",
-            "finalprice": "مبلغ نهایی (تومان)", "grandtotal": "جمع کل (تومان)", "amount": "مبلغ (تومان)",
-            "price": "قیمت واحد (تومان)", "unitprice": "قیمت واحد (تومان)", "sellingprice": "قیمت فروش (تومان)",
-            "saleprice": "قیمت فروش (تومان)", "specialprice": "قیمت با تخفیف (تومان)",
-            "discount": "تخفیف (تومان)", "discountamount": "مبلغ تخفیف (تومان)", "totaldiscount": "مجموع تخفیف (تومان)",
-            "snappshopdiscount": "تخفیف اسنپ‌شاپ", "vendordiscount": "تخفیف فروشنده",
-            "shippingcost": "هزینه ارسال (تومان)", "shippingprice": "هزینه ارسال (تومان)", "deliveryprice": "هزینه ارسال (تومان)",
-            "commission": "کمیسیون (تومان)", "fee": "کارمزد (تومان)", "tax": "مالیات و ارزش افزوده", "vat": "ارزش افزوده",
-            "sku": "کد کالا (SKU)", "vendorsku": "کد کالای فروشنده", "sellersku": "کد کالای فروشنده",
-            "productcode": "کد محصول", "variantid": "کد تنوع", "productid": "شناسه محصول",
-            "title": "نام کالا", "name": "نام کالا", "productname": "نام کالا", "producttitle": "عنوان کالا",
-            "varianttitle": "تنوع / ویژگی", "color": "رنگ", "size": "سایز", "guarantee": "گارانتی", "warranty": "گارانتی",
-            "quantity": "تعداد", "qty": "تعداد", "count": "تعداد", "stock": "موجودی",
-            "paymentmethod": "روش پرداخت", "paymentstatus": "وضعیت پرداخت", "shippingmethod": "روش ارسال",
-            "city": "شهر", "province": "استان", "description": "توضیحات", "note": "یادداشت"
-        }'''
-        if 'FA_HEAD = {' in lg and '"variantid"' not in lg:
-            s_i = lg.index("FA_HEAD = {")
-            e_i = lg.index("\n\ndef fa_header", s_i)
-            lg = lg[:s_i] + new_fa_head + lg[e_i:]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SnappShop-exe
+          path: dist/SnappShop.exe
 
-        # Localize min_prices.csv read/write headers while supporting both Persian & English columns
-        old_rw_mins = lg[lg.index("def read_mins_csv"):]
-        new_rw_mins = '''def read_mins_csv(path: str) -> Dict[str, float]:
-            import csv
-            out: Dict[str, float] = {}
-            with open(path, newline="", encoding="utf-8-sig") as f:
-                rows = list(csv.reader(f))
-            if not rows:
-                return out
-            head = [str(h).strip().lower() for h in rows[0]]
-            si = next((i for i, h in enumerate(head) if norm(h) in ("sku", "code", "id") or "کد" in h or "شناسه" in h), 0)
-            mi = next((i for i, h in enumerate(head) if "min" in norm(h) or "حداقل" in h or "کف" in h), None)
-            if mi is None:
-                mi = len(head) - 1 if len(head) > 1 else 0
-            for r in rows[1:]:
-                if len(r) <= max(si, mi):
-                    continue
-                v = to_num(r[mi])
-                if r[si].strip() and v is not None and v > 0:
-                    out[r[si].strip()] = v
-            return out
-
-
-        def write_mins_csv(path: str, products: List[Prod], mins: Dict[str, float]):
-            import csv
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                w.writerow(["کد کالا (SKU)", "نام کالا", "قیمت فعلی (تومان)", "قیمت نفر اول (تومان)", "حداقل قیمت مجاز (تومان)"])
-                for o in products:
-                    w.writerow([o.sku, o.name, "" if o.price is None else int(o.price),
-                                "" if o.comp is None else int(o.comp), "" if o.sku not in mins else int(mins[o.sku])])
-        '''
-        import textwrap
-        lg = lg[:lg.index("def read_mins_csv")] + textwrap.dedent(new_rw_mins)
-
-        # Upgrade build_sales_workbook to accept optional (prods, low_stock_threshold) used by bot.py
-        old_bsw = '''def build_sales_workbook(orders: List[dict]) -> bytes:
-            cols, rows = sales_rows(orders)
-            head = {c: fa_header(c) for c in cols}
-            drows = [{head[c]: r.get(c) for c in cols} for r in rows]
-            sku_rows, day_rows = sales_summary(orders)
-            return make_xlsx_multi([
-                ("ریز سفارشات", [head[c] for c in cols], drows),
-                ("خلاصه کالا", ["کد کالا", "نام", "تعداد", "جمع فروش", "تعداد سفارش"], sku_rows),
-                ("خلاصه روزانه", ["تاریخ", "تعداد سفارش", "جمع فروش"], day_rows),
-            ])'''
-
-        new_bsw = '''def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None, low_stock: int = 3) -> bytes:
-            cols, rows = sales_rows(orders)
-            head = {}
-            used = set()
-            for c in cols:
-                h = fa_header(c)
-                if h in used and h != c:
-                    h = f"{h} ({c.split('.')[-1]})"
-                used.add(h)
-                head[c] = h
-            drows = [{head[c]: r.get(c) for c in cols} for r in rows]
-            sku_rows, day_rows = sales_summary(orders)
-            sheets = [
-                ("ریز سفارشات", [head[c] for c in cols], drows),
-                ("خلاصه فروش هر کالا", ["کد کالا", "نام", "تعداد", "جمع فروش", "تعداد سفارش"], sku_rows),
-                ("خلاصه فروش روزانه", ["تاریخ", "تعداد سفارش", "جمع فروش"], day_rows),
-            ]
-            if prods:
-                low_rows = [
-                    {"کد کالا (SKU)": p.sku, "نام کالا": p.name, "موجودی فعلی": int(p.stock or 0),
-                     "قیمت فعلی (تومان)": "" if p.price is None else int(p.price)}
-                    for p in prods if p.stock is not None and p.stock <= low_stock
-                ]
-                sheets.append(("کالاهای رو به اتمام", ["کد کالا (SKU)", "نام کالا", "موجودی فعلی", "قیمت فعلی (تومان)"], low_rows))
-            return make_xlsx_multi(sheets)'''
-
-        if "low_stock: int = 3" not in lg:
-            lg = lg.replace(textwrap.dedent(old_bsw), textwrap.dedent(new_bsw))
-
-        # Add missing attributes/functions expected by bot.py
-        extra_logic = '''
-        # ---------------- bot.py compatibility helpers ----------------
-        def _extend_prod_for_bot():
-            orig_init = Prod.__init__
-            def _new_init(self, raw, idx):
-                orig_init(self, raw, idx)
-                fl = flat(raw) if isinstance(raw, dict) else []
-                id_f = find(raw, ["id", "productid", "variantid"], fl) if fl else None
-                sp_f = find(raw, ["specialprice", "discountprice", "offprice"], fl) if fl else None
-                st_f = find(raw, ["specialpricestartat", "specialstart", "discountstartat"], fl) if fl else None
-                en_f = find(raw, ["specialpriceendat", "specialend", "discountendat"], fl) if fl else None
-                self.id = str(id_f["value"]) if id_f else self.sku
-                self.sp = to_num(sp_f["value"]) if sp_f else None
-                self.sp_start = str(st_f["value"]) if st_f else ""
-                self.sp_end = str(en_f["value"]) if en_f else ""
-
-            @property
-            def _key(self):
-                return self.sku or self.id or self.name
-
-            def _item(self, price, stock, **extra):
-                d = {"price": int(price), "stock": int(stock)}
-                if self.sku:
-                    d["sku"] = self.sku
-                elif self.id:
-                    d["id"] = self.id
-                d.update(extra)
-                return d
-
-            Prod.__init__ = _new_init
-            Prod.key = _key
-            Prod.item = _item
-
-        _extend_prod_for_bot()
-
-
-        def event_line(e: dict) -> str:
-            if not isinstance(e, dict):
-                return str(e)
-            t = str(e.get("event_type") or e.get("type") or "")
-            num = e.get("order_number") or e.get("order_id") or e.get("id") or "—"
-            items = e.get("items") or []
-            tot = sum(to_num(i.get("final_price") or i.get("price")) or 0 for i in items if isinstance(i, dict))
-            t_fa = "سفارش جدید" if "NEW" in t.upper() else ("لغو سفارش" if "CANCEL" in t.upper() else (t or "رویداد سفارش"))
-            msg = f"{t_fa} | شماره سفارش: {num} | تعداد اقلام: {len(items)}"
-            if tot:
-                msg += f" | مبلغ: {int(tot):,} تومان"
-            return msg
-
-
-        def summarize_patch(res: list):
-            if not isinstance(res, list):
-                return 0, []
-            ok, bad = 0, []
-            for r in res:
-                if not isinstance(r, dict):
-                    ok += 1
-                    continue
-                st = str(r.get("status") or "").lower()
-                errs = r.get("messages") or r.get("errors") or r.get("error")
-                if st in ("error", "failed", "fail") or errs:
-                    bad.append((str(r.get("sku") or r.get("id") or "?"), str(errs or st)))
-                else:
-                    ok += 1
-            return (ok or len(res) - len(bad)), bad
-
-
-        def products_export_rows(prods: List[Prod]):
-            cols = [
-                "کد کالا (SKU)", "شناسه محصول", "نام کالا", "قیمت فروش (تومان)", "موجودی",
-                "قیمت نفر اول (تومان)", "وضعیت بای‌باکس", "قیمت ویژه (تومان)", "شروع قیمت ویژه", "پایان قیمت ویژه"
-            ]
-            rows = []
-            for p in prods:
-                rows.append({
-                    "کد کالا (SKU)": p.sku,
-                    "شناسه محصول": getattr(p, "id", p.sku),
-                    "نام کالا": p.name,
-                    "قیمت فروش (تومان)": "" if p.price is None else int(p.price),
-                    "موجودی": "" if p.stock is None else int(p.stock),
-                    "قیمت نفر اول (تومان)": "" if p.comp is None else int(p.comp),
-                    "وضعیت بای‌باکس": "دارد" if p.bb is True else ("ندارد" if p.lose else "نامشخص"),
-                    "قیمت ویژه (تومان)": "" if not getattr(p, "sp", None) else int(p.sp),
-                    "شروع قیمت ویژه": getattr(p, "sp_start", "")[:10],
-                    "پایان قیمت ویژه": getattr(p, "sp_end", "")[:10],
-                })
-            return cols, rows
-        '''
-        if "def products_export_rows" not in lg:
-            lg = lg.rstrip() + "\n\n" + textwrap.dedent(extra_logic)
-
-        ast.parse(lg)
-        p_logic.write_text(lg, encoding="utf-8")
-
-        # =====================================================================
-        # 2. Fix bot.py (Persian CSV headers + Persian user-friendly logs)
-        # =====================================================================
-        p_bot = pathlib.Path("bot.py")
-        b = p_bot.read_text(encoding="utf-8").replace("\r\n", "\n")
-
-        b = b.replace(
-            'w.writerow(["logged_at", "event_type", "order_number", "event_at", "items", "final_price_total"])',
-            'w.writerow(["زمان ثبت", "نوع رویداد", "شماره سفارش", "تاریخ رویداد", "تعداد اقلام", "مبلغ کل (تومان)"])'
-        )
-        b = b.replace(
-            'log.info("Order events: caught up (%d older events skipped). Alerts start now.", len(evs))',
-            'log.info("بررسی رویدادهای سفارش فعال شد (%d رویداد قبلی نادیده گرفته شد).", len(evs))'
-        )
-        b = b.replace(
-            'log.info("Wrote %d products to %s. Copy it to prices.csv, edit price/stock/special_* and save.", len(rows), EXPORT)',
-            'log.info("فایل اکسل لیست محصولات (%d کالا) در مسیر زیر ساخته شد:\\n%s", len(rows), EXPORT)'
-        )
-        b = b.replace(
-            'log.info("Report saved: %s (%d orders, %s..%s)", path, len(orders), start, today)',
-            'log.info("گزارش فروش (%d سفارش از %s تا %s) ذخیره شد:\\n%s", len(orders), start, today, path)'
-        )
-        b = b.replace(
-            'log.info("Bot started. Store %s. Orders check every %ss. prices_dry_run=%s",',
-            'log.info("ربات پس‌زمینه برای فروشگاه %s روشن شد (بررسی هر %s ثانیه | حالت آزمایشی=%s).",',
-        )
-        b = b.replace('log.info("Bot stopped.")', 'log.info("ربات پس‌زمینه متوقف شد.")')
-
-        # Support both Persian and English column names when reading prices.csv in bot.py
-        old_sync_lookup = '''        for r in rows:
-            p = by_sku.get(r.get("sku", "")) if r.get("sku") else None
-            if p is None and r.get("id"):
-                p = by_id.get(r["id"])
-            if p is None:
-                if r.get("sku") or r.get("id"):
-                    log.warning("prices.csv: product not found: %s", r.get("sku") or r.get("id"))
-                continue
-            price, stock = L.to_num(r.get("price")), L.to_num(r.get("stock"))'''
-
-        new_sync_lookup = '''        for r in rows:
-            r_sku = r.get("sku") or r.get("کد کالا (sku)") or r.get("کد کالا") or ""
-            r_id = r.get("id") or r.get("شناسه محصول") or r.get("کد تنوع") or ""
-            p = by_sku.get(r_sku) if r_sku else None
-            if p is None and r_id:
-                p = by_id.get(r_id)
-            if p is None:
-                if r_sku or r_id:
-                    log.warning("کالا در لیست فروشگاه پیدا نشد: %s", r_sku or r_id)
-                continue
-            price = L.to_num(r.get("price") if "price" in r else (r.get("قیمت فروش (تومان)") or r.get("قیمت پایه (تومان)") or r.get("قیمت")))
-            stock = L.to_num(r.get("stock") if "stock" in r else r.get("موجودی"))'''
-
-        if "r_sku =" not in b and old_sync_lookup in b:
-            b = b.replace(old_sync_lookup, new_sync_lookup)
-
-        b = b.replace(
-            'sp = L.to_num(r.get("special_price"))',
-            'sp = L.to_num(r.get("special_price") if "special_price" in r else r.get("قیمت ویژه (تومان)"))'
-        )
-        ast.parse(b)
-        p_bot.write_text(b, encoding="utf-8")
-
-        # =====================================================================
-        # 3. Fix main.py (Clean user-friendly logs, Persian Excel cols, unified UI)
-        # =====================================================================
-        p_main = pathlib.Path("main.py")
-        m = p_main.read_text(encoding="utf-8").replace("\r\n", "\n")
-
-        # Replace GuiLogHandler with clean, thread-safe Persian formatter
-        old_gui_handler = m[m.index("class GuiLogHandler"):m.index("class ProdCard(Bg):")]
-        new_gui_handler = '''class GuiLogHandler(logging.Handler):
-            """Shows clean, user-friendly Persian bot messages inside the report tab."""
-            def __init__(self, app):
-                super().__init__(logging.INFO)
-                self.app = app
-                self.setFormatter(logging.Formatter("%(message)s"))
-
-            def emit(self, r):
-                try:
-                    msg = self.format(r).strip()
-                    if not msg or any(x in msg for x in ("Traceback", "HTTPSConnectionPool", "{", "}", "DEBUG", "urllib3", "config.json reloaded")):
-                        return
-                    if msg.startswith("EVENT "):
-                        msg = msg[6:].strip()
-                    kind = "err" if r.levelno >= logging.WARNING else ("ok" if ("سفارش جدید" in msg or "ذخیره شد" in msg or "ساخته شد" in msg) else "info")
-                    self.app.ui(lambda m_=msg, k_=kind: self.app.log(m_, k_))
-                except Exception:
-                    pass
-
-
-        '''
-        m = m[:m.index("class GuiLogHandler")] + textwrap.dedent(new_gui_handler) + m[m.index("class ProdCard(Bg):"):]
-
-        # Make sure mcards (min_prices CSV export/import) and extra bot tools are shown identically on Android & Windows
-        m = m.replace('        if platform != "android":\n            mb1 =', '        if True:\n            mb1 =')
-        m = m.replace(
-            '        hb = RBtn("تاریخچه‌ی قیمت‌گذاری ربات (Excel)", ACC2)\n        hb.bind(on_release=lambda *_: self.export_history())\n        cards_bot = [bot_card, mins_card, card("گزارش", hb)]',
-            '        hb = RBtn("تاریخچه‌ی قیمت‌گذاری ربات (Excel)", ACC2)\n'
-            '        hb.bind(on_release=lambda *_: self.export_history())\n'
-            '        b_exp = RBtn("دریافت فایل اکسل همه محصولات (CSV)", ACC2)\n'
-            '        b_exp.bind(on_release=lambda *_: self.bot_export())\n'
-            '        b_rep = RBtn("گزارش فروش کامل امروز + کالاهای رو به اتمام (Excel)", (0.20, 0.65, 0.35, 1))\n'
-            '        b_rep.bind(on_release=lambda *_: self.bot_report())\n'
-            '        b_fld = RBtn("باز کردن پوشه فایل‌های خروجی", ACC2)\n'
-            '        b_fld.bind(on_release=lambda *_: self.open_folder())\n'
-            '        cards_bot = [bot_card, mins_card, card("خروجی‌های اکسل و گزارش فروش", b_exp, b_rep, hb, b_fld)]'
-        )
-
-        # Clean raw JSON / Tracebacks from log() and translate technical exceptions to user-friendly Persian
-        old_log_fn = '''    def log(self, text, kind="info"):
-                self._flog(text, kind)'''
-        new_log_fn = '''    def log(self, text, kind="info"):
-                s_txt = str(text).strip()
-                if any(x in s_txt for x in ("HTTPSConnectionPool", "Max retries exceeded", "RemoteDisconnected", "ConnectionResetError", "Read timed out")):
-                    text = "خطا در برقراری ارتباط با سرور اسنپ‌شاپ. لطفاً اتصال اینترنت را بررسی کنید."
-                    kind = "err"
-                elif "401 Client Error" in s_txt or "403 Client Error" in s_txt or "HTTP 401" in s_txt or "HTTP 403" in s_txt:
-                    text = "توکن یا کد یکتا (User-Agent) معتبر نیست. لطفاً اطلاعات اتصال را بررسی کنید."
-                    kind = "err"
-                elif "HTTPError" in s_txt or "Client Error" in s_txt or "Server Error" in s_txt:
-                    text = "سرور اسنپ‌شاپ درخواست را نپذیرفت. لطفاً دوباره تلاش کنید."
-                    kind = "err"
-                self._flog(text, kind)'''
-        if "Max retries exceeded" not in m:
-            m = m.replace(textwrap.dedent(old_log_fn), textwrap.dedent(new_log_fn), 1)
-
-        # Clean raw json.dumps in update_product()
-        m = m.replace(
-            '        def f():\n            r = self.api.update_products(self.vendor_id, [{"sku": sku, "stock": int(st), "price": int(pr)}])\n            self.log("به‌روزرسانی انجام شد.\\n" + json.dumps(r, ensure_ascii=False, indent=2), "ok")',
-            '        def f():\n            self.ap
+      - name: Publish EXE to Releases (direct download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-windows
+          name: Latest Windows build
+          files: dist/SnappShop.exe
