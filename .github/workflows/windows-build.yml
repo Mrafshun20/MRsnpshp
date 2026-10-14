@@ -24,7 +24,7 @@ jobs:
       shell: bash
       run: |
         python - << 'EOF'
-        import pathlib, re, py_compile, textwrap
+        import pathlib, py_compile, textwrap
 
         # --- 1. Patch bot.py ---
         b = pathlib.Path("bot.py").read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -91,19 +91,17 @@ jobs:
                         except Exception:
                             pass
         '''
-        # Strip everything before "from kivy.app import App" and prepend head_new guaranteed
         kivy_idx = m.find("from kivy.app import App")
         assert kivy_idx != -1, "Could not find Kivy import in main.py"
         m = textwrap.dedent(head_new).lstrip() + "\n" + m[kivy_idx:]
 
-        # Fix Persian hint_text in inp()
-        m = re.sub(
-            r'def inp\(hint,\s*text="",\s*\*\*kw\):\s*\n\s*return TextInput\(hint_text=hint,',
-            'def inp(hint, text="", **kw):\n    has_fa = bool(re.search("[\\u0600-\\u06FF]", str(hint)))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign="right" if has_fa else "left",',
-            m
+        # Plain string replace for Persian hint_text (no regex escapes)
+        m = m.replace(
+            "return TextInput(hint_text=hint,",
+            "has_fa = any('\\u0600' <= ch <= '\\u06FF' for ch in str(hint))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign='right' if has_fa else 'left',",
+            1
         )
 
-        # Ensure GuiLogHandler has logging imported right next to it too
         gui_log_cls = '''import logging
         from logging.handlers import RotatingFileHandler
 
@@ -327,13 +325,12 @@ jobs:
 
         pathlib.Path("main.py").write_text(m, encoding="utf-8")
 
-        # Verify syntax and verify 'import logging' is present
         assert "import datetime, json, logging, ntpath" in m, "Header injection failed!"
         py_compile.compile("bot.py", doraise=True)
         py_compile.compile("main.py", doraise=True)
         py_compile.compile("core.py", doraise=True)
         py_compile.compile("logic.py", doraise=True)
-        print("Verified: logging and Windows DLL fixes are injected at line 1 of main.py!")
+        print("Verified: All files compiled cleanly!")
         EOF
 
     - name: Commit unified files back to repository
