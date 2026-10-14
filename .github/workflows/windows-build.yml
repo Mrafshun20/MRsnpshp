@@ -20,16 +20,316 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Restore and patch logic.py and main.py
+    - name: Unify bot.py, logic.py, and main.py
+      shell: bash
       run: |
-        python -c "import base64; exec(base64.b64decode('aW1wb3J0IHBhdGhsaWIsIHB5X2NvbXBpbGUKbCA9IHBhdGhsaWIuUGF0aCgnbG9naWNfdjNfdW51c2VkLnB5JykucmVhZF90ZXh0KGVuY29kaW5nPSd1dGYtOCcpCmwgPSBsLnJlcGxhY2UoJywgImJ1eWJveCIsJywgJycpLnJlcGxhY2UoJ0NPTVBLID0gWyJsb3dlc3RwcmljZSIsJywgJ0NPTVBLID0gWyJidXlib3giLCAibG93ZXN0cHJpY2UiLCcpCnBhdGhsaWIuUGF0aCgnbG9naWMucHknKS53cml0ZV90ZXh0KGwsIGVuY29kaW5nPSd1dGYtOCcpCm0gPSBwYXRobGliLlBhdGgoJ21haW5fdjNfdW51c2VkLnB5JykucmVhZF90ZXh0KGVuY29kaW5nPSd1dGYtOCcpCmhkciA9ICcjIC0qLSBjb2Rpbmc6IHV0Zi04IC0qLVxuaW1wb3J0IGNzdiwgZGF0ZXRpbWUsIGpzb24sIG50cGF0aCwgb3MsIHJlLCBzaHV0aWwsIHNpdGUsIHN5cywgdGhyZWFkaW5nLCB0aW1lXG5IRVJFID0gZ2V0YXR0cihzeXMsICJfTUVJUEFTUyIsIG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmFic3BhdGgoX19maWxlX18pKSlcbmlmIGdldGF0dHIoc2l0ZSwgIlVTRVJfQkFTRSIsIE5vbmUpIGlzIE5vbmU6IHNpdGUuVVNFUl9CQVNFID0gSEVSRVxuaWYgZ2V0YXR0cihzaXRlLCAiVVNFUl9TSVRFIiwgTm9uZSkgaXMgTm9uZTogc2l0ZS5VU0VSX1NJVEUgPSBIRVJFXG5fb3JpZ19qb2luID0gbnRwYXRoLmpvaW5cbmRlZiBfc2FmZV9qb2luKGEsICpwKTogcmV0dXJuIF9vcmlnX2pvaW4oYSBpZiBhIGlzIG5vdCBOb25lIGVsc2UgSEVSRSwgKlt4IGZvciB4IGluIHAgaWYgeCBpcyBub3QgTm9uZV0pXG5udHBhdGguam9pbiA9IG9zLnBhdGguam9pbiA9IF9zYWZlX2pvaW5cbmlmIGhhc2F0dHIob3MsICJhZGRfZGxsX2RpcmVjdG9yeSIpOlxuICAgIGZvciBfZCBpbiAoIiIsICJzaGFyZVxcXFxzZGwyXFxcXGJpbiIsICJzaGFyZVxcXFxnbGV3XFxcXGJpbiIsICJzaGFyZVxcXFxhbmdsZVxcXFxiaW4iKTpcbiAgICAgICAgX3AgPSBfb3JpZ19qb2luKEhFUkUsIF9kKSBpZiBfZCBlbHNlIEhFUkVcbiAgICAgICAgaWYgb3MucGF0aC5pc2RpcihfcCk6XG4gICAgICAgICAgICB0cnk6IG9zLmFkZF9kbGxfZGlyZWN0b3J5KF9wKVxuICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjogcGFzc1xuaWYgc3lzLnN0ZG91dCBpcyBOb25lOiBzeXMuc3Rkb3V0ID0gb3Blbihvcy5kZXZudWxsLCAidyIpXG5pZiBzeXMuc3RkZXJyIGlzIE5vbmU6IHN5cy5zdGRlcnIgPSBvcGVuKG9zLmRldm51bGwsICJ3Iilcbm9zLmVudmlyb24uc2V0ZGVmYXVsdCgiS0lWWV9OT19DT05TT0xFTE9HIiwgIjEiKVxuJwptID0gaGRyICsgbVttLmZpbmQoJ2Zyb20gY29uY3VycmVudC5mdXR1cmVzJyk6XQptID0gbS5yZXBsYWNlKCdyZXR1cm4gVGV4dElucHV0KGhpbnRfdGV4dD1oaW50LCcsICdoYXNfZmEgPSBib29sKHJlLnNlYXJjaCgiW1xcdTA2MDAtXFx1MDZGRl0iLCBzdHIoaGludCkpKVxuICAgIHJldHVybiBUZXh0SW5wdXQoaGludF90ZXh0PWZhKGhpbnQpIGlmIGhhc19mYSBlbHNlIHN0cihoaW50KSwgaGFsaWduPSJyaWdodCIgaWYgaGFzX2ZhIGVsc2UgImxlZnQiLCcpCnBhdGhsaWIuUGF0aCgnbWFpbi5weScpLndyaXRlX3RleHQobSwgZW5jb2Rpbmc9J3V0Zi04JykKcHlfY29tcGlsZS5jb21waWxlKCdsb2dpYy5weScsIGRvcmFpc2U9VHJ1ZSkKcHlfY29tcGlsZS5jb21waWxlKCdtYWluLnB5JywgZG9yYWlzZT1UcnVlKQpwcmludCgnQm90aCBmaWxlcyBwYXRjaGVkIGFuZCB2ZXJpZmllZCBPSyEnKQ==').decode('utf-8'))"
+        python - << 'EOF'
+        import pathlib, re, py_compile
 
-    - name: Commit repaired files back to repository
+        # --- 1. Patch bot.py for GUI background thread compatibility ---
+        b = pathlib.Path("bot.py").read_text(encoding="utf-8")
+        if "SNAPP_BOT_DIR" not in b:
+            b = b.replace(
+                'APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))',
+                'APP_DIR = os.environ.get("SNAPP_BOT_DIR") or (os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__)))', 1
+            )
+        if "import threading" not in b:
+            b = b.replace("import time\nfrom logging.handlers", "import threading\nimport time\nfrom logging.handlers", 1)
+        if "self.stop_ev" not in b:
+            b = b.replace(
+                "        self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0\n",
+                "        self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0\n        self.stop_ev = threading.Event()\n\n    def stop(self):\n        self.stop_ev.set()\n", 1
+            )
+            b = b.replace(
+                "            time.sleep(10)\n            self.reload_cfg()",
+                "            if self.stop_ev.wait(10):\n                log.info(\"Bot stopped.\")\n                return 0\n            self.reload_cfg()", 1
+            )
+            b = b.replace(
+                "        while True:\n            now = time.monotonic()",
+                "        while not self.stop_ev.is_set():\n            now = time.monotonic()", 1
+            )
+        if "--minimized" not in b:
+            b = b.replace(
+                '    cmd = (f\'cmd /c start "" /min "{sys.executable}"\' if FROZEN',
+                '    cmd = (f\'cmd /c start "" /min "{sys.executable}" --minimized\' if FROZEN', 1
+            )
+            b = b.replace(
+                '    ap.add_argument("--uninstall-startup", action="store_true")',
+                '    ap.add_argument("--uninstall-startup", action="store_true")\n    ap.add_argument("--minimized", action="store_true", help=argparse.SUPPRESS)', 1
+            )
+        pathlib.Path("bot.py").write_text(b, encoding="utf-8")
+
+        # --- 2. Patch main.py with Windows DLL fixes + Desktop Bot Tab ---
+        m = pathlib.Path("main.py").read_text(encoding="utf-8")
+        head_old = "# -*- coding: utf-8 -*-\nimport datetime, json, os, shutil, sys, threading, time\nfrom typing import Any, Dict, List\n"
+        head_new = '''# -*- coding: utf-8 -*-
+        import datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time
+        from logging.handlers import RotatingFileHandler
+        from typing import Any, Dict, List
+
+        _HERE0 = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        if sys.stdout is None:
+            sys.stdout = open(os.devnull, "w")
+        if sys.stderr is None:
+            sys.stderr = open(os.devnull, "w")
+        os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
+        if os.name == "nt":
+            if getattr(site, "USER_BASE", None) is None:
+                site.USER_BASE = _HERE0
+            if getattr(site, "USER_SITE", None) is None:
+                site.USER_SITE = _HERE0
+            _orig_join = ntpath.join
+            def _safe_join(a, *p):
+                return _orig_join(a if a is not None else _HERE0, *[x for x in p if x is not None])
+            ntpath.join = os.path.join = _safe_join
+            if hasattr(os, "add_dll_directory"):
+                for _d in ("", "share\\\\sdl2\\\\bin", "share\\\\glew\\\\bin", "share\\\\angle\\\\bin"):
+                    _p = _orig_join(_HERE0, _d) if _d else _HERE0
+                    if os.path.isdir(_p):
+                        try:
+                            os.add_dll_directory(_p)
+                        except Exception:
+                            pass
+        '''
+        import textwrap
+        if m.startswith(head_old):
+            m = textwrap.dedent(head_new).lstrip() + m[len(head_old):]
+
+        # Fix Persian hint_text in inp()
+        m = m.replace(
+            'def inp(hint, text="", **kw):\n    return TextInput(hint_text=hint,',
+            'def inp(hint, text="", **kw):\n    has_fa = bool(re.search("[\\u0600-\\u06FF]", str(hint)))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign="right" if has_fa else "left",'
+        )
+
+        if "class GuiLogHandler" not in m:
+            gui_log_cls = '''class GuiLogHandler(logging.Handler):
+            """Shows the bot's log lines inside the app's report tab."""
+            def __init__(self, app):
+                super().__init__(logging.INFO)
+                self.app = app
+                self.setFormatter(logging.Formatter("%(message)s"))
+
+            def emit(self, r):
+                try:
+                    msg = self.format(r)
+                    kind = "err" if r.levelno >= logging.WARNING else ("ok" if "NEW_ORDER" in msg else "info")
+                    self.app.log(msg, kind)
+                except Exception:
+                    pass
+
+
+        class ProdCard(Bg):'''
+            m = m.replace("class ProdCard(Bg):", textwrap.dedent(gui_log_cls).lstrip(), 1)
+
+        if "self.desktop =" not in m:
+            m = m.replace(
+                '        self.low = int(self.cfg.get("low", 3))\n',
+                '        self.low = int(self.cfg.get("low", 3))\n        self.desktop = platform != "android"\n        self.bot = self._bot_mod() if self.desktop else None\n        self.bot_obj = None\n        self._bot_log_ready = False\n', 1
+            )
+
+        if "        # --- order alerts" in m and "        # --- log\n" in m:
+            a = m.index("        # --- order alerts")
+            b_ = m.index("        # --- log\n")
+            page_new = '''        # --- automation page
+                if not self.desktop:
+                    self.ent_wi = inp("Seconds", str(self.cfg.get("watch_sec", 60)), input_filter="int")
+                    self.watch_lbl = lab("وضعیت: خاموش", MUT, 14, bold=True)
+                    self.watch_last = lab("", MUT, 12)
+                    w1 = RBtn("روشن کردن هشدار سفارش جدید", (0.30, 0.85, 0.50, 1))
+                    w1.color = (0.04, 0.12, 0.07, 1)
+                    w1.bind(on_release=lambda *_: self.start_watch())
+                    w2 = RBtn("خاموش کردن", (0.80, 0.26, 0.26, 1))
+                    w2.bind(on_release=lambda *_: self.stop_watch())
+                    self._add("auto", page(card(
+                        "هشدار سفارش جدید", lab("هر چند ثانیه بررسی شود", MUT, 12), self.ent_wi,
+                        self.watch_lbl, self.watch_last, w1, w2,
+                        lab("هشدار فقط وقتی کار میکند که برنامه باز باشد. برای اجرای بیوقفه از برنامهی ویندوز استفاده کنید.", MUT, 11))))
+                else:
+                    self.ent_wi = inp("Seconds", "60")
+                    self.bot_lbl = lab("وضعیت ربات: خاموش", MUT, 14, bold=True)
+                    bb1 = RBtn("روشن کردن ربات", (0.30, 0.85, 0.50, 1))
+                    bb1.color = (0.04, 0.12, 0.07, 1)
+                    bb1.bind(on_release=lambda *_: self.start_bot())
+                    bb2 = RBtn("خاموش کردن ربات", (0.80, 0.26, 0.26, 1))
+                    bb2.bind(on_release=lambda *_: self.stop_bot())
+                    self.dry_btn = RBtn("", ACC2)
+                    self._dry_text()
+                    self.dry_btn.bind(on_release=lambda *_: self.toggle_dry())
+                    bb3 = RBtn("ساخت فایل قیمتها (prices_export.csv)", ACC2)
+                    bb3.bind(on_release=lambda *_: self.bot_export())
+                    bb4 = RBtn("گزارش فروش همین حالا", ACC2)
+                    bb4.bind(on_release=lambda *_: self.bot_report())
+                    bb5 = RBtn("باز کردن پوشهی فایلها", ACC2)
+                    bb5.bind(on_release=lambda *_: self.open_folder())
+                    cards_auto = [
+                        card("ربات پسزمینه", self.bot_lbl, bb1, bb2,
+                             lab("تا وقتی ربات روشن است: سفارش جدید و لغو را با صدا اعلام میکند، تغییرات فایل prices.csv را (قیمت، موجودی، تخفیف) روی اسنپشاپ اعمال میکند و هر شب گزارش Excel میسازد. برنامه را Minimize کنید، نه Close.", MUT, 11)),
+                        card("قیمت از روی فایل (Excel)", self.dry_btn, bb3,
+                             lab("۱) «ساخت فایل قیمتها» را بزنید. ۲) فایل prices_export.csv را با نام prices.csv کپی کنید. ۳) ستونهای price و stock و special_price را در Excel ویرایش و ذخیره کنید. ۴) اول در حالت آزمایشی نتیجه را در گزارش ببینید، بعد حالت آزمایشی را خاموش کنید. تغییر قیمت بیش از ۵۰٪ برای جلوگیری از اشتباه تایپی رد میشود.", MUT, 11)),
+                        card("فایلها", bb4, bb5)]
+                    if os.name == "nt":
+                        self.win_btn = RBtn("", ACC2)
+                        self._win_text()
+                        self.win_btn.bind(on_release=lambda *_: self.toggle_winstart())
+                        cards_auto.append(card("ویندوز", self.win_btn,
+                                               lab("با روشن شدن ویندوز، برنامه Minimize باز میشود و ربات (اگر روشن بوده) خودش ادامه میدهد. تا ربات روشن است ویندوز به حالت خواب نمیرود.", MUT, 11)))
+                    self._add("auto", page(*cards_auto))
+
+        '''
+            m = m[:a] + textwrap.dedent(page_new) + m[b_:]
+
+        m = m.replace('("هشدار", "auto")', '("هشدار" if not self.desktop else "ربات", "auto")')
+
+        if 'if self.desktop and self.cfg.get("bot_on")' not in m:
+            m = m.replace(
+                '        self.log("آماده است.")\n        return root\n',
+                '        self.log("آماده است.")\n        if self.desktop and self.cfg.get("bot_on") and self.cfg.get("ua") and self.cfg.get("token") and self.cfg.get("vid"):\n            Clock.schedule_once(lambda dt: self.start_bot(), 2)\n        if os.name == "nt" and "--minimized" in sys.argv:\n            Clock.schedule_once(lambda dt: self._minimize(), 3)\n        return root\n', 1
+            )
+
+        if "def _bot_mod(self):" not in m:
+            bot_methods = '''    # ---- desktop bot (runs bot.Bot in a background thread)
+            def _bot_mod(self):
+                os.environ.setdefault("SNAPP_BOT_DIR", self.out_dir())
+                import bot
+                return bot
+
+            def _bot_cfg(self):
+                cfg = dict(self.bot.DEFAULT)
+                cfg.update(self.bot.jload(self.bot.CFG, {}))
+                cfg.update({"user_agent": self.ent_ua.text.strip(), "token": self.ent_token.text.strip(),
+                            "vendor_id": self.ent_vid.text.strip()})
+                return cfg
+
+            def _attach_bot_log(self):
+                if self._bot_log_ready:
+                    return
+                lg = logging.getLogger("bot")
+                lg.setLevel(logging.INFO)
+                lg.addHandler(GuiLogHandler(self))
+                try:
+                    fh = RotatingFileHandler(os.path.join(self.out_dir(), "bot.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+                    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+                    lg.addHandler(fh)
+                except Exception:
+                    pass
+                self._bot_log_ready = True
+
+            def _bot_label(self, on):
+                self.bot_lbl.text = fa("وضعیت ربات: روشن" if on else "وضعیت ربات: خاموش")
+                self.bot_lbl.color = GRN if on else MUT
+
+            def start_bot(self):
+                if self.bot_obj is not None:
+                    return
+                if not self._need_vid():
+                    return
+                self._attach_bot_log()
+                b = self.bot.Bot(self._bot_cfg())
+                self.bot_obj = b
+                self.cfg["bot_on"] = True
+                self._save()
+                self._bot_label(True)
+                def run():
+                    rc = None
+                    try:
+                        rc = b.run()
+                    except Exception as e:
+                        self.log(f"خطا در ربات: {e}", "err")
+                    def done():
+                        if self.bot_obj is b:
+                            self.bot_obj = None
+                            self._bot_label(False)
+                        if rc == 2:
+                            self.log("توکن پذیرفته نشد؛ ربات متوقف شد.", "err")
+                    self.ui(done)
+                threading.Thread(target=run, daemon=True).start()
+
+            def stop_bot(self):
+                if self.bot_obj is not None:
+                    self.bot_obj.stop()
+                    self.bot_obj = None
+                self.cfg["bot_on"] = False
+                self._save()
+                self._bot_label(False)
+                self.log("ربات خاموش شد.")
+
+            def _dry_text(self):
+                dry = bool(self.bot.jload(self.bot.CFG, {}).get("prices_dry_run", True))
+                self.dry_btn.set_text("اعمال prices.csv: " + ("فقط آزمایشی (چیزی تغییر نمیکند)" if dry else "واقعی (تغییرات ارسال میشود)"))
+
+            def toggle_dry(self):
+                c = self.bot.jload(self.bot.CFG, {})
+                c["prices_dry_run"] = not c.get("prices_dry_run", True)
+                self.bot.jsave(self.bot.CFG, c)
+                self._dry_text()
+                self.log("prices.csv حالا " + ("آزمایشی است." if c["prices_dry_run"] else "واقعی است؛ تغییرات روی اسنپشاپ اعمال میشود."), "ok" if c["prices_dry_run"] else "err")
+
+            def _win_text(self):
+                self.win_btn.set_text("اجرا با روشن شدن ویندوز: " + ("بله" if self.cfg.get("winstart") else "خیر"))
+
+            def toggle_winstart(self):
+                on = not self.cfg.get("winstart")
+                if on and not getattr(sys, "frozen", False):
+                    self.log("این گزینه فقط در نسخهی EXE کار میکند.", "err")
+                    return
+                try:
+                    self.bot.startup(on)
+                except Exception as e:
+                    self.log(f"تنظیم اجرای خودکار ناموفق بود: {e}", "err")
+                    return
+                self.cfg["winstart"] = on
+                self._save()
+                self._win_text()
+                self.log("اجرا با روشن شدن ویندوز " + ("فعال شد." if on else "غیرفعال شد."), "ok")
+
+            def bot_export(self):
+                if not self._need_vid():
+                    return
+                self._attach_bot_log()
+                self.go("log")
+                self._run(lambda: self.bot.Bot(self._bot_cfg()).export_products())
+
+            def bot_report(self):
+                if not self._need_vid():
+                    return
+                self._attach_bot_log()
+                self.go("log")
+                self._run(lambda: self.bot.Bot(self._bot_cfg()).report(force=True))
+
+            def open_folder(self):
+                d = self.out_dir()
+                try:
+                    if os.name == "nt":
+                        os.startfile(d)
+                    else:
+                        import subprocess
+                        subprocess.Popen(["xdg-open", d])
+                except Exception as e:
+                    self.log(f"پوشه: {d} ({e})", "info")
+
+            def _minimize(self):
+                try:
+                    Window.minimize()
+                except Exception:
+                    pass
+
+            def on_pause(self):'''
+            m = m.replace("    def on_pause(self):", textwrap.dedent(bot_methods), 1)
+
+        pathlib.Path("main.py").write_text(m, encoding="utf-8")
+
+        py_compile.compile("bot.py", doraise=True)
+        py_compile.compile("main.py", doraise=True)
+        py_compile.compile("core.py", doraise=True)
+        print("All modules compiled and unified successfully!")
+        EOF
+
+    - name: Commit unified files back to repository
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add logic.py main.py
-        git diff --staged --quiet || git commit -m "Auto-repair logic.py and main.py"
+        git add bot.py main.py
+        git diff --staged --quiet || git commit -m "Unify desktop bot engine with GUI"
         git push || true
 
     - name: Install dependencies
@@ -42,10 +342,11 @@ jobs:
         KIVY_GL_BACKEND: angle_sdl2
         KIVY_NO_CONSOLELOG: 1
       run: |
-        python -c "import sys, os, PyInstaller.__main__, kivy_deps.sdl2, kivy_deps.glew, kivy_deps.angle; share = os.path.join(sys.prefix, 'share'); bins = [f'--add-binary={p};.' for p in (kivy_deps.sdl2.dep_bins + kivy_deps.glew.dep_bins + kivy_deps.angle.dep_bins) if os.path.isdir(p)]; PyInstaller.__main__.run(['--noconfirm', '--onefile', '--windowed', '--add-data=DejaVuSans.ttf;.', '--add-data=DejaVuSans-Bold.ttf;.', f'--add-data={share};share', *bins, '--hidden-import=logic', '--hidden-import=kivy_deps.sdl2', '--hidden-import=kivy_deps.glew', '--hidden-import=kivy_deps.angle', 'main.py'])"
+        python -c "import sys, os, PyInstaller.__main__, kivy_deps.sdl2, kivy_deps.glew, kivy_deps.angle; share = os.path.join(sys.prefix, 'share'); bins = [f'--add-binary={p};.' for p in (kivy_deps.sdl2.dep_bins + kivy_deps.glew.dep_bins + kivy_deps.angle.dep_bins) if os.path.isdir(p)]; PyInstaller.__main__.run(['--noconfirm', '--onefile', '--windowed', '--add-data=DejaVuSans.ttf;.', '--add-data=DejaVuSans-Bold.ttf;.', f'--add-data={share};share', *bins, '--hidden-import=logic', '--hidden-import=core', '--hidden-import=bot', '--hidden-import=kivy_deps.sdl2', '--hidden-import=kivy_deps.glew', '--hidden-import=kivy_deps.angle', 'main.py'])"
 
     - name: Upload EXE
       uses: actions/upload-artifact@v4
       with:
         name: SnappShop-Windows-App
         path: dist/main.exe
+        
