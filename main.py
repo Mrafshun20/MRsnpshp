@@ -1,24 +1,32 @@
 # -*- coding: utf-8 -*-
-import csv, datetime, json, ntpath, os, re, shutil, site, sys, threading, time
-HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-if getattr(site, "USER_BASE", None) is None: site.USER_BASE = HERE
-if getattr(site, "USER_SITE", None) is None: site.USER_SITE = HERE
-_orig_join = ntpath.join
-def _safe_join(a, *p): return _orig_join(a if a is not None else HERE, *[x for x in p if x is not None])
-ntpath.join = os.path.join = _safe_join
-if hasattr(os, "add_dll_directory"):
-    for _d in ("", "share\\sdl2\\bin", "share\\glew\\bin", "share\\angle\\bin"):
-        _p = _orig_join(HERE, _d) if _d else HERE
-        if os.path.isdir(_p):
-            try: os.add_dll_directory(_p)
-            except Exception: pass
-if sys.stdout is None: sys.stdout = open(os.devnull, "w")
-if sys.stderr is None: sys.stderr = open(os.devnull, "w")
-os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+import datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time
+from logging.handlers import RotatingFileHandler
+from typing import Any, Dict, List
 
-import requests
+_HERE0 = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
+if os.name == "nt":
+    if getattr(site, "USER_BASE", None) is None:
+        site.USER_BASE = _HERE0
+    if getattr(site, "USER_SITE", None) is None:
+        site.USER_SITE = _HERE0
+    _orig_join = ntpath.join
+    def _safe_join(a, *p):
+        return _orig_join(a if a is not None else _HERE0, *[x for x in p if x is not None])
+    ntpath.join = os.path.join = _safe_join
+    if hasattr(os, "add_dll_directory"):
+        for _d in ("", "share\\sdl2\\bin", "share\\glew\\bin", "share\\angle\\bin"):
+            _p = _orig_join(_HERE0, _d) if _d else _HERE0
+            if os.path.isdir(_p):
+                try:
+                    os.add_dll_directory(_p)
+                except Exception:
+                    pass
+
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
@@ -297,6 +305,9 @@ class NavBtn(ToggleButtonBehavior, Label):
 class StatusBar(ButtonBehavior, Label):
     pass
 
+
+import logging
+from logging.handlers import RotatingFileHandler
 
 class GuiLogHandler(logging.Handler):
     """Shows the bot's log lines inside the app's report tab."""
