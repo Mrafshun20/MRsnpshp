@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v4
@@ -20,346 +21,349 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Unify files, clean UI logs, and localize Excel headers
+    - name: Unify logic.py, bot.py, main.py, and buildozer.spec
       shell: python
       run: |
-        import ast, os, re, sys, pathlib, py_compile
+        import ast, pathlib, py_compile
 
-        # --- 1. Patch bot.py ---
+        # =====================================================================
+        # 1. Fix logic.py (Persian headers + missing bot.py helpers & Prod attrs)
+        # =====================================================================
+        p_logic = pathlib.Path("logic.py")
+        lg = p_logic.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+        # Expand Persian headers dictionary for SnappShop orders/items
+        old_fa_head = '''FA_HEAD = {"ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش", "status": "وضعیت",
+                   "createdat": "تاریخ", "orderdate": "تاریخ", "date": "تاریخ", "total": "مبلغ کل", "totalprice": "مبلغ کل",
+                   "sku": "کد کالا", "title": "نام", "name": "نام", "quantity": "تعداد", "qty": "تعداد", "price": "قیمت واحد",
+                   "count": "تعداد"}'''
+
+        new_fa_head = '''FA_HEAD = {
+            "ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش", "ordercode": "کد سفارش",
+            "id": "شناسه", "code": "کد", "status": "وضعیت سفارش", "orderstatus": "وضعیت سفارش",
+            "statustitle": "وضعیت سفارش", "statusname": "وضعیت سفارش", "state": "وضعیت",
+            "createdat": "تاریخ ثبت", "orderdate": "تاریخ سفارش", "placedat": "زمان ثبت", "date": "تاریخ",
+            "updatedat": "آخرین بروزرسانی", "deliverydate": "تاریخ تحویل", "shippingdate": "تاریخ ارسال",
+            "total": "مبلغ کل (تومان)", "totalprice": "مبلغ کل (تومان)", "totalamount": "مبلغ کل (تومان)",
+            "payable": "مبلغ قابل پرداخت (تومان)", "payableamount": "مبلغ قابل پرداخت (تومان)",
+            "finalprice": "مبلغ نهایی (تومان)", "grandtotal": "جمع کل (تومان)", "amount": "مبلغ (تومان)",
+            "price": "قیمت واحد (تومان)", "unitprice": "قیمت واحد (تومان)", "sellingprice": "قیمت فروش (تومان)",
+            "saleprice": "قیمت فروش (تومان)", "specialprice": "قیمت با تخفیف (تومان)",
+            "discount": "تخفیف (تومان)", "discountamount": "مبلغ تخفیف (تومان)", "totaldiscount": "مجموع تخفیف (تومان)",
+            "snappshopdiscount": "تخفیف اسنپ‌شاپ", "vendordiscount": "تخفیف فروشنده",
+            "shippingcost": "هزینه ارسال (تومان)", "shippingprice": "هزینه ارسال (تومان)", "deliveryprice": "هزینه ارسال (تومان)",
+            "commission": "کمیسیون (تومان)", "fee": "کارمزد (تومان)", "tax": "مالیات و ارزش افزوده", "vat": "ارزش افزوده",
+            "sku": "کد کالا (SKU)", "vendorsku": "کد کالای فروشنده", "sellersku": "کد کالای فروشنده",
+            "productcode": "کد محصول", "variantid": "کد تنوع", "productid": "شناسه محصول",
+            "title": "نام کالا", "name": "نام کالا", "productname": "نام کالا", "producttitle": "عنوان کالا",
+            "varianttitle": "تنوع / ویژگی", "color": "رنگ", "size": "سایز", "guarantee": "گارانتی", "warranty": "گارانتی",
+            "quantity": "تعداد", "qty": "تعداد", "count": "تعداد", "stock": "موجودی",
+            "paymentmethod": "روش پرداخت", "paymentstatus": "وضعیت پرداخت", "shippingmethod": "روش ارسال",
+            "city": "شهر", "province": "استان", "description": "توضیحات", "note": "یادداشت"
+        }'''
+        if 'FA_HEAD = {' in lg and '"variantid"' not in lg:
+            s_i = lg.index("FA_HEAD = {")
+            e_i = lg.index("\n\ndef fa_header", s_i)
+            lg = lg[:s_i] + new_fa_head + lg[e_i:]
+
+        # Localize min_prices.csv read/write headers while supporting both Persian & English columns
+        old_rw_mins = lg[lg.index("def read_mins_csv"):]
+        new_rw_mins = '''def read_mins_csv(path: str) -> Dict[str, float]:
+            import csv
+            out: Dict[str, float] = {}
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                rows = list(csv.reader(f))
+            if not rows:
+                return out
+            head = [str(h).strip().lower() for h in rows[0]]
+            si = next((i for i, h in enumerate(head) if norm(h) in ("sku", "code", "id") or "کد" in h or "شناسه" in h), 0)
+            mi = next((i for i, h in enumerate(head) if "min" in norm(h) or "حداقل" in h or "کف" in h), None)
+            if mi is None:
+                mi = len(head) - 1 if len(head) > 1 else 0
+            for r in rows[1:]:
+                if len(r) <= max(si, mi):
+                    continue
+                v = to_num(r[mi])
+                if r[si].strip() and v is not None and v > 0:
+                    out[r[si].strip()] = v
+            return out
+
+
+        def write_mins_csv(path: str, products: List[Prod], mins: Dict[str, float]):
+            import csv
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["کد کالا (SKU)", "نام کالا", "قیمت فعلی (تومان)", "قیمت نفر اول (تومان)", "حداقل قیمت مجاز (تومان)"])
+                for o in products:
+                    w.writerow([o.sku, o.name, "" if o.price is None else int(o.price),
+                                "" if o.comp is None else int(o.comp), "" if o.sku not in mins else int(mins[o.sku])])
+        '''
+        import textwrap
+        lg = lg[:lg.index("def read_mins_csv")] + textwrap.dedent(new_rw_mins)
+
+        # Upgrade build_sales_workbook to accept optional (prods, low_stock_threshold) used by bot.py
+        old_bsw = '''def build_sales_workbook(orders: List[dict]) -> bytes:
+            cols, rows = sales_rows(orders)
+            head = {c: fa_header(c) for c in cols}
+            drows = [{head[c]: r.get(c) for c in cols} for r in rows]
+            sku_rows, day_rows = sales_summary(orders)
+            return make_xlsx_multi([
+                ("ریز سفارشات", [head[c] for c in cols], drows),
+                ("خلاصه کالا", ["کد کالا", "نام", "تعداد", "جمع فروش", "تعداد سفارش"], sku_rows),
+                ("خلاصه روزانه", ["تاریخ", "تعداد سفارش", "جمع فروش"], day_rows),
+            ])'''
+
+        new_bsw = '''def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None, low_stock: int = 3) -> bytes:
+            cols, rows = sales_rows(orders)
+            head = {}
+            used = set()
+            for c in cols:
+                h = fa_header(c)
+                if h in used and h != c:
+                    h = f"{h} ({c.split('.')[-1]})"
+                used.add(h)
+                head[c] = h
+            drows = [{head[c]: r.get(c) for c in cols} for r in rows]
+            sku_rows, day_rows = sales_summary(orders)
+            sheets = [
+                ("ریز سفارشات", [head[c] for c in cols], drows),
+                ("خلاصه فروش هر کالا", ["کد کالا", "نام", "تعداد", "جمع فروش", "تعداد سفارش"], sku_rows),
+                ("خلاصه فروش روزانه", ["تاریخ", "تعداد سفارش", "جمع فروش"], day_rows),
+            ]
+            if prods:
+                low_rows = [
+                    {"کد کالا (SKU)": p.sku, "نام کالا": p.name, "موجودی فعلی": int(p.stock or 0),
+                     "قیمت فعلی (تومان)": "" if p.price is None else int(p.price)}
+                    for p in prods if p.stock is not None and p.stock <= low_stock
+                ]
+                sheets.append(("کالاهای رو به اتمام", ["کد کالا (SKU)", "نام کالا", "موجودی فعلی", "قیمت فعلی (تومان)"], low_rows))
+            return make_xlsx_multi(sheets)'''
+
+        if "low_stock: int = 3" not in lg:
+            lg = lg.replace(textwrap.dedent(old_bsw), textwrap.dedent(new_bsw))
+
+        # Add missing attributes/functions expected by bot.py
+        extra_logic = '''
+        # ---------------- bot.py compatibility helpers ----------------
+        def _extend_prod_for_bot():
+            orig_init = Prod.__init__
+            def _new_init(self, raw, idx):
+                orig_init(self, raw, idx)
+                fl = flat(raw) if isinstance(raw, dict) else []
+                id_f = find(raw, ["id", "productid", "variantid"], fl) if fl else None
+                sp_f = find(raw, ["specialprice", "discountprice", "offprice"], fl) if fl else None
+                st_f = find(raw, ["specialpricestartat", "specialstart", "discountstartat"], fl) if fl else None
+                en_f = find(raw, ["specialpriceendat", "specialend", "discountendat"], fl) if fl else None
+                self.id = str(id_f["value"]) if id_f else self.sku
+                self.sp = to_num(sp_f["value"]) if sp_f else None
+                self.sp_start = str(st_f["value"]) if st_f else ""
+                self.sp_end = str(en_f["value"]) if en_f else ""
+
+            @property
+            def _key(self):
+                return self.sku or self.id or self.name
+
+            def _item(self, price, stock, **extra):
+                d = {"price": int(price), "stock": int(stock)}
+                if self.sku:
+                    d["sku"] = self.sku
+                elif self.id:
+                    d["id"] = self.id
+                d.update(extra)
+                return d
+
+            Prod.__init__ = _new_init
+            Prod.key = _key
+            Prod.item = _item
+
+        _extend_prod_for_bot()
+
+
+        def event_line(e: dict) -> str:
+            if not isinstance(e, dict):
+                return str(e)
+            t = str(e.get("event_type") or e.get("type") or "")
+            num = e.get("order_number") or e.get("order_id") or e.get("id") or "—"
+            items = e.get("items") or []
+            tot = sum(to_num(i.get("final_price") or i.get("price")) or 0 for i in items if isinstance(i, dict))
+            t_fa = "سفارش جدید" if "NEW" in t.upper() else ("لغو سفارش" if "CANCEL" in t.upper() else (t or "رویداد سفارش"))
+            msg = f"{t_fa} | شماره سفارش: {num} | تعداد اقلام: {len(items)}"
+            if tot:
+                msg += f" | مبلغ: {int(tot):,} تومان"
+            return msg
+
+
+        def summarize_patch(res: list):
+            if not isinstance(res, list):
+                return 0, []
+            ok, bad = 0, []
+            for r in res:
+                if not isinstance(r, dict):
+                    ok += 1
+                    continue
+                st = str(r.get("status") or "").lower()
+                errs = r.get("messages") or r.get("errors") or r.get("error")
+                if st in ("error", "failed", "fail") or errs:
+                    bad.append((str(r.get("sku") or r.get("id") or "?"), str(errs or st)))
+                else:
+                    ok += 1
+            return (ok or len(res) - len(bad)), bad
+
+
+        def products_export_rows(prods: List[Prod]):
+            cols = [
+                "کد کالا (SKU)", "شناسه محصول", "نام کالا", "قیمت فروش (تومان)", "موجودی",
+                "قیمت نفر اول (تومان)", "وضعیت بای‌باکس", "قیمت ویژه (تومان)", "شروع قیمت ویژه", "پایان قیمت ویژه"
+            ]
+            rows = []
+            for p in prods:
+                rows.append({
+                    "کد کالا (SKU)": p.sku,
+                    "شناسه محصول": getattr(p, "id", p.sku),
+                    "نام کالا": p.name,
+                    "قیمت فروش (تومان)": "" if p.price is None else int(p.price),
+                    "موجودی": "" if p.stock is None else int(p.stock),
+                    "قیمت نفر اول (تومان)": "" if p.comp is None else int(p.comp),
+                    "وضعیت بای‌باکس": "دارد" if p.bb is True else ("ندارد" if p.lose else "نامشخص"),
+                    "قیمت ویژه (تومان)": "" if not getattr(p, "sp", None) else int(p.sp),
+                    "شروع قیمت ویژه": getattr(p, "sp_start", "")[:10],
+                    "پایان قیمت ویژه": getattr(p, "sp_end", "")[:10],
+                })
+            return cols, rows
+        '''
+        if "def products_export_rows" not in lg:
+            lg = lg.rstrip() + "\n\n" + textwrap.dedent(extra_logic)
+
+        ast.parse(lg)
+        p_logic.write_text(lg, encoding="utf-8")
+
+        # =====================================================================
+        # 2. Fix bot.py (Persian CSV headers + Persian user-friendly logs)
+        # =====================================================================
         p_bot = pathlib.Path("bot.py")
-        if p_bot.exists():
-            b = p_bot.read_text(encoding="utf-8").replace("\r\n", "\n")
-            if "SNAPP_BOT_DIR" not in b:
-                b = b.replace(
-                    'APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))',
-                    'APP_DIR = os.environ.get("SNAPP_BOT_DIR") or (os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__)))',
-                    1
-                )
-            if "import threading" not in b:
-                b = "import threading\n" + b
-            if "self.stop_ev" not in b:
-                b = b.replace(
-                    "        self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0\n",
-                    "        self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0\n        self.stop_ev = threading.Event()\n\n    def stop(self):\n        self.stop_ev.set()\n",
-                    1
-                )
-                b = b.replace(
-                    "            time.sleep(10)\n            self.reload_cfg()",
-                    "            if self.stop_ev.wait(10):\n                log.info('ربات متوقف شد.')\n                return 0\n            self.reload_cfg()",
-                    1
-                )
-                b = b.replace(
-                    "        while True:\n            now = time.monotonic()",
-                    "        while not self.stop_ev.is_set():\n            now = time.monotonic()",
-                    1
-                )
-            if "--minimized" not in b:
-                b = b.replace(
-                    '    cmd = (f\'cmd /c start "" /min "{sys.executable}"\' if FROZEN',
-                    '    cmd = (f\'cmd /c start "" /min "{sys.executable}" --minimized\' if FROZEN',
-                    1
-                )
-                b = b.replace(
-                    '    ap.add_argument("--uninstall-startup", action="store_true")',
-                    '    ap.add_argument("--uninstall-startup", action="store_true")\n    ap.add_argument("--minimized", action="store_true", help=argparse.SUPPRESS)',
-                    1
-                )
-            for old_list in (
-                '["variant_id", "product_title", "variant_title", "stock", "price", "special_price", "snappshop_discount"]',
-                '["کد تنوع (غیرقابل تغییر)", "نام محصول", "تنوع / ویژگی", "موجودی", "قیمت پایه (تومان)", "قیمت با تخفیف (تومان)", "تخفیف اسنپ‌شاپ"]'
-            ):
-                b = b.replace(
-                    old_list,
-                    '["کد تنوع", "نام محصول", "تنوع / ویژگی", "موجودی", "قیمت پایه (تومان)", "قیمت با تخفیف (تومان)", "تخفیف اسنپ‌شاپ"]'
-                )
-            if 'r.get("کد تنوع")' not in b:
-                b = b.replace(
-                    'r.get("variant_id")',
-                    '(r.get("variant_id") or r.get("کد تنوع") or r.get("کد تنوع (غیرقابل تغییر)") or r.get("کد محصول"))'
-                )
-                b = b.replace(
-                    'r.get("stock")',
-                    '(r.get("stock") if r.get("stock") not in (None, "") else r.get("موجودی"))'
-                )
-                b = b.replace(
-                    'r.get("price")',
-                    '(r.get("price") if r.get("price") not in (None, "") else r.get("قیمت پایه (تومان)"))'
-                )
-                b = b.replace(
-                    'r.get("special_price")',
-                    '(r.get("special_price") if r.get("special_price") not in (None, "") else r.get("قیمت با تخفیف (تومان)"))'
-                )
-            ast.parse(b)
-            p_bot.write_text(b, encoding="utf-8")
+        b = p_bot.read_text(encoding="utf-8").replace("\r\n", "\n")
 
-        # --- 2. Patch main.py ---
+        b = b.replace(
+            'w.writerow(["logged_at", "event_type", "order_number", "event_at", "items", "final_price_total"])',
+            'w.writerow(["زمان ثبت", "نوع رویداد", "شماره سفارش", "تاریخ رویداد", "تعداد اقلام", "مبلغ کل (تومان)"])'
+        )
+        b = b.replace(
+            'log.info("Order events: caught up (%d older events skipped). Alerts start now.", len(evs))',
+            'log.info("بررسی رویدادهای سفارش فعال شد (%d رویداد قبلی نادیده گرفته شد).", len(evs))'
+        )
+        b = b.replace(
+            'log.info("Wrote %d products to %s. Copy it to prices.csv, edit price/stock/special_* and save.", len(rows), EXPORT)',
+            'log.info("فایل اکسل لیست محصولات (%d کالا) در مسیر زیر ساخته شد:\\n%s", len(rows), EXPORT)'
+        )
+        b = b.replace(
+            'log.info("Report saved: %s (%d orders, %s..%s)", path, len(orders), start, today)',
+            'log.info("گزارش فروش (%d سفارش از %s تا %s) ذخیره شد:\\n%s", len(orders), start, today, path)'
+        )
+        b = b.replace(
+            'log.info("Bot started. Store %s. Orders check every %ss. prices_dry_run=%s",',
+            'log.info("ربات پس‌زمینه برای فروشگاه %s روشن شد (بررسی هر %s ثانیه | حالت آزمایشی=%s).",',
+        )
+        b = b.replace('log.info("Bot stopped.")', 'log.info("ربات پس‌زمینه متوقف شد.")')
+
+        # Support both Persian and English column names when reading prices.csv in bot.py
+        old_sync_lookup = '''        for r in rows:
+            p = by_sku.get(r.get("sku", "")) if r.get("sku") else None
+            if p is None and r.get("id"):
+                p = by_id.get(r["id"])
+            if p is None:
+                if r.get("sku") or r.get("id"):
+                    log.warning("prices.csv: product not found: %s", r.get("sku") or r.get("id"))
+                continue
+            price, stock = L.to_num(r.get("price")), L.to_num(r.get("stock"))'''
+
+        new_sync_lookup = '''        for r in rows:
+            r_sku = r.get("sku") or r.get("کد کالا (sku)") or r.get("کد کالا") or ""
+            r_id = r.get("id") or r.get("شناسه محصول") or r.get("کد تنوع") or ""
+            p = by_sku.get(r_sku) if r_sku else None
+            if p is None and r_id:
+                p = by_id.get(r_id)
+            if p is None:
+                if r_sku or r_id:
+                    log.warning("کالا در لیست فروشگاه پیدا نشد: %s", r_sku or r_id)
+                continue
+            price = L.to_num(r.get("price") if "price" in r else (r.get("قیمت فروش (تومان)") or r.get("قیمت پایه (تومان)") or r.get("قیمت")))
+            stock = L.to_num(r.get("stock") if "stock" in r else r.get("موجودی"))'''
+
+        if "r_sku =" not in b and old_sync_lookup in b:
+            b = b.replace(old_sync_lookup, new_sync_lookup)
+
+        b = b.replace(
+            'sp = L.to_num(r.get("special_price"))',
+            'sp = L.to_num(r.get("special_price") if "special_price" in r else r.get("قیمت ویژه (تومان)"))'
+        )
+        ast.parse(b)
+        p_bot.write_text(b, encoding="utf-8")
+
+        # =====================================================================
+        # 3. Fix main.py (Clean user-friendly logs, Persian Excel cols, unified UI)
+        # =====================================================================
         p_main = pathlib.Path("main.py")
         m = p_main.read_text(encoding="utf-8").replace("\r\n", "\n")
 
-        header = "\n".join([
-            "# -*- coding: utf-8 -*-",
-            "import csv, datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time",
-            "from concurrent.futures import ThreadPoolExecutor",
-            "from logging.handlers import RotatingFileHandler",
-            "from typing import Any, Dict, List, Optional, Tuple, Union",
-            "import requests",
-            "_HERE0 = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))",
-            "if sys.stdout is None: sys.stdout = open(os.devnull, 'w')",
-            "if sys.stderr is None: sys.stderr = open(os.devnull, 'w')",
-            "os.environ.setdefault('KIVY_NO_CONSOLELOG', '1')",
-            "if os.name == 'nt':",
-            "    if getattr(site, 'USER_BASE', None) is None: site.USER_BASE = _HERE0",
-            "    if getattr(site, 'USER_SITE', None) is None: site.USER_SITE = _HERE0",
-            "    _oj = ntpath.join",
-            "    ntpath.join = os.path.join = lambda a, *q: _oj(a if a is not None else _HERE0, *[x for x in q if x is not None])",
-            "    if hasattr(os, 'add_dll_directory'):",
-            "        for _d in ('', 'share/sdl2/bin', 'share/glew/bin', 'share/angle/bin'):",
-            "            _p = _oj(_HERE0, _d) if _d else _HERE0",
-            "            if os.path.isdir(_p):",
-            "                try: os.add_dll_directory(_p)",
-            "                except Exception: pass",
-            ""
-        ])
-        idx = m.find("from kivy.app import App")
-        if idx != -1:
-            m = header + m[idx:]
-        elif "_HERE0 =" not in m:
-            m = header + m
+        # Replace GuiLogHandler with clean, thread-safe Persian formatter
+        old_gui_handler = m[m.index("class GuiLogHandler"):m.index("class ProdCard(Bg):")]
+        new_gui_handler = '''class GuiLogHandler(logging.Handler):
+            """Shows clean, user-friendly Persian bot messages inside the report tab."""
+            def __init__(self, app):
+                super().__init__(logging.INFO)
+                self.app = app
+                self.setFormatter(logging.Formatter("%(message)s"))
 
-        m = m.replace("from typing import Any, Dict, List\n", "from typing import Any, Dict, List, Optional\n")
+            def emit(self, r):
+                try:
+                    msg = self.format(r).strip()
+                    if not msg or any(x in msg for x in ("Traceback", "HTTPSConnectionPool", "{", "}", "DEBUG", "urllib3", "config.json reloaded")):
+                        return
+                    if msg.startswith("EVENT "):
+                        msg = msg[6:].strip()
+                    kind = "err" if r.levelno >= logging.WARNING else ("ok" if ("سفارش جدید" in msg or "ذخیره شد" in msg or "ساخته شد" in msg) else "info")
+                    self.app.ui(lambda m_=msg, k_=kind: self.app.log(m_, k_))
+                except Exception:
+                    pass
 
-        if "has_fa = any(ord(c) > 1500" not in m:
-            m = m.replace(
-                "return TextInput(hint_text=hint,",
-                "has_fa = any(ord(c) > 1500 for c in str(hint))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign='right' if has_fa else 'left',",
-                1
-            )
 
-        gui_log_cls = "\n".join([
-            "class GuiLogHandler(logging.Handler):",
-            "    def __init__(self, app):",
-            "        super().__init__(logging.INFO)",
-            "        self.app = app",
-            "        self.setFormatter(logging.Formatter('%(message)s'))",
-            "",
-            "    def emit(self, r):",
-            "        try:",
-            "            msg = self.format(r).strip()",
-            "            if not msg or any(x in msg for x in ('Traceback', 'HTTP', '{', '}', '[', ']', 'DEBUG', 'urllib3', 'Starting', 'Cycle')):",
-            "                return",
-            "            if 'NEW_ORDER' in msg:",
-            "                self.app.ui(lambda: self.app.log('سفارش جدید ثبت شد.', 'ok'))",
-            "            elif 'CANCEL' in msg:",
-            "                self.app.ui(lambda: self.app.log('یک سفارش لغو شد.', 'err'))",
-            "            elif 'export' in msg.lower() or 'prices_export.csv' in msg:",
-            "                self.app.ui(lambda: self.app.log('فایل اکسل لیست قیمت و موجودی محصولات آماده شد.', 'ok'))",
-            "            elif 'report' in msg.lower() or '.xlsx' in msg or '.csv' in msg or '.html' in msg:",
-            "                self.app.ui(lambda: self.app.log('فایل گزارش فروش آماده و در پوشه خروجی ذخیره شد.', 'ok'))",
-            "            elif any(ord(c) > 1500 for c in msg):",
-            "                kind = 'err' if r.levelno >= logging.WARNING else 'info'",
-            "                self.app.ui(lambda m_=msg, k_=kind: self.app.log(m_, k_))",
-            "        except Exception:",
-            "            pass",
-            "",
-            "",
-            "class ProdCard(Bg):"
-        ])
-        if "class GuiLogHandler" in m and "class ProdCard(Bg):" in m:
-            m = m[:m.index("class GuiLogHandler")] + gui_log_cls + m[m.index("class ProdCard(Bg):") + len("class ProdCard(Bg):"):]
-        elif "class ProdCard(Bg):" in m:
-            m = m.replace("class ProdCard(Bg):", gui_log_cls, 1)
+        '''
+        m = m[:m.index("class GuiLogHandler")] + textwrap.dedent(new_gui_handler) + m[m.index("class ProdCard(Bg):"):]
 
-        if "def log(self, msg, kind=" in m and "Max retries" not in m:
-            m = re.sub(
-                r'    def log\(self, msg, kind="info"\):\n(?:        s_msg =.*?\n(?:            .*?\n)+)?',
-                '    def log(self, msg, kind="info"):\n'
-                '        s_msg = str(msg).strip()\n'
-                '        if any(x in s_msg for x in ("{", "}", "Traceback", "HTTPSConnectionPool", "Max retries", "Client Error", "Server Error")):\n'
-                '            if kind == "err":\n'
-                '                msg = "خطا در ارتباط با سرور اسنپ‌شاپ. اینترنت یا توکن را بررسی کنید."\n'
-                '            else:\n'
-                '                return\n',
-                m,
-                count=1
-            )
+        # Make sure mcards (min_prices CSV export/import) and extra bot tools are shown identically on Android & Windows
+        m = m.replace('        if platform != "android":\n            mb1 =', '        if True:\n            mb1 =')
+        m = m.replace(
+            '        hb = RBtn("تاریخچه‌ی قیمت‌گذاری ربات (Excel)", ACC2)\n        hb.bind(on_release=lambda *_: self.export_history())\n        cards_bot = [bot_card, mins_card, card("گزارش", hb)]',
+            '        hb = RBtn("تاریخچه‌ی قیمت‌گذاری ربات (Excel)", ACC2)\n'
+            '        hb.bind(on_release=lambda *_: self.export_history())\n'
+            '        b_exp = RBtn("دریافت فایل اکسل همه محصولات (CSV)", ACC2)\n'
+            '        b_exp.bind(on_release=lambda *_: self.bot_export())\n'
+            '        b_rep = RBtn("گزارش فروش کامل امروز + کالاهای رو به اتمام (Excel)", (0.20, 0.65, 0.35, 1))\n'
+            '        b_rep.bind(on_release=lambda *_: self.bot_report())\n'
+            '        b_fld = RBtn("باز کردن پوشه فایل‌های خروجی", ACC2)\n'
+            '        b_fld.bind(on_release=lambda *_: self.open_folder())\n'
+            '        cards_bot = [bot_card, mins_card, card("خروجی‌های اکسل و گزارش فروش", b_exp, b_rep, hb, b_fld)]'
+        )
 
-        if "self.bot_obj =" not in m:
-            m = m.replace(
-                '        self.low = int(self.cfg.get("low", 3))\n',
-                '        self.low = int(self.cfg.get("low", 3))\n        self.desktop = platform != "android"\n        self.bot = self._bot_mod()\n        self.bot_obj = None\n        self._bot_log_ready = False\n',
-                1
-            )
-        else:
-            m = m.replace(
-                "self.bot = self._bot_mod() if self.desktop else None",
-                "self.bot = self._bot_mod()"
-            )
+        # Clean raw JSON / Tracebacks from log() and translate technical exceptions to user-friendly Persian
+        old_log_fn = '''    def log(self, text, kind="info"):
+                self._flog(text, kind)'''
+        new_log_fn = '''    def log(self, text, kind="info"):
+                s_txt = str(text).strip()
+                if any(x in s_txt for x in ("HTTPSConnectionPool", "Max retries exceeded", "RemoteDisconnected", "ConnectionResetError", "Read timed out")):
+                    text = "خطا در برقراری ارتباط با سرور اسنپ‌شاپ. لطفاً اتصال اینترنت را بررسی کنید."
+                    kind = "err"
+                elif "401 Client Error" in s_txt or "403 Client Error" in s_txt or "HTTP 401" in s_txt or "HTTP 403" in s_txt:
+                    text = "توکن یا کد یکتا (User-Agent) معتبر نیست. لطفاً اطلاعات اتصال را بررسی کنید."
+                    kind = "err"
+                elif "HTTPError" in s_txt or "Client Error" in s_txt or "Server Error" in s_txt:
+                    text = "سرور اسنپ‌شاپ درخواست را نپذیرفت. لطفاً دوباره تلاش کنید."
+                    kind = "err"
+                self._flog(text, kind)'''
+        if "Max retries exceeded" not in m:
+            m = m.replace(textwrap.dedent(old_log_fn), textwrap.dedent(new_log_fn), 1)
 
-        for start_marker in ("        # --- order alerts", "        # --- automation page"):
-            if start_marker in m and "        # --- log\n" in m:
-                a = m.index(start_marker)
-                b_ = m.index("        # --- log\n")
-                page_new = "\n".join([
-                    "        # --- automation page (unified Android & Windows UI)",
-                    '        self.ent_wi = inp("Seconds", str(self.cfg.get("watch_sec", 60)), input_filter="int")',
-                    '        self.watch_lbl = lab("وضعیت هشدار: خاموش", MUT, 14, bold=True)',
-                    '        self.watch_last = lab("", MUT, 12)',
-                    '        w1 = RBtn("روشن کردن هشدار سفارش جدید", (0.30, 0.85, 0.50, 1))',
-                    "        w1.color = (0.04, 0.12, 0.07, 1)",
-                    "        w1.bind(on_release=lambda *_: self.start_watch())",
-                    '        w2 = RBtn("خاموش کردن هشدار", (0.80, 0.26, 0.26, 1))',
-                    "        w2.bind(on_release=lambda *_: self.stop_watch())",
-                    "        cards_auto = [card(",
-                    '            "هشدار سفارش جدید", lab("هر چند ثانیه بررسی شود", MUT, 12), self.ent_wi,',
-                    "            self.watch_lbl, self.watch_last, w1, w2)]",
-                    "        if self.bot is not None:",
-                    '            self.bot_lbl = lab("وضعیت ربات: خاموش", MUT, 14, bold=True)',
-                    '            bb1 = RBtn("روشن کردن ربات هوشمند", (0.30, 0.85, 0.50, 1))',
-                    "            bb1.color = (0.04, 0.12, 0.07, 1)",
-                    "            bb1.bind(on_release=lambda *_: self.start_bot())",
-                    '            bb2 = RBtn("خاموش کردن ربات", (0.80, 0.26, 0.26, 1))',
-                    "            bb2.bind(on_release=lambda *_: self.stop_bot())",
-                    '            self.dry_btn = RBtn("", ACC2)',
-                    "            self._dry_text()",
-                    "            self.dry_btn.bind(on_release=lambda *_: self.toggle_dry())",
-                    '            bb3 = RBtn("دریافت فایل اکسل محصولات و قیمت‌ها", ACC2)',
-                    "            bb3.bind(on_release=lambda *_: self.bot_export())",
-                    '            bb4 = RBtn("دریافت گزارش فروش (اکسل)", ACC2)',
-                    "            bb4.bind(on_release=lambda *_: self.bot_report())",
-                    '            bb5 = RBtn("باز کردن پوشه فایل‌های خروجی", ACC2)',
-                    "            bb5.bind(on_release=lambda *_: self.open_folder())",
-                    "            cards_auto.extend([",
-                    '                card("ربات هوشمند پس‌زمینه", self.bot_lbl, bb1, bb2,',
-                    '                     lab("اعلام صوتی سفارش جدید، بروزرسانی خودکار قیمت و موجودی از اکسل و ساخت گزارش فروش روزانه.", MUT, 11)),',
-                    '                card("مدیریت گروهی قیمت و موجودی (اکسل)", self.dry_btn, bb3,',
-                    '                     lab("۱) فایل اکسل محصولات را دریافت کنید. ۲) قیمت یا موجودی را ویرایش و با نام prices.csv ذخیره کنید.", MUT, 11)),',
-                    '                card("گزارش‌ها و فایل‌های خروجی", bb4, bb5)])',
-                    '            if os.name == "nt":',
-                    '                self.win_btn = RBtn("", ACC2)',
-                    "                self._win_text()",
-                    "                self.win_btn.bind(on_release=lambda *_: self.toggle_winstart())",
-                    '                cards_auto.append(card("اجرای خودکار در ویندوز", self.win_btn,',
-                    '                                       lab("اجرای خودکار برنامه به صورت Minimize هنگام روشن شدن ویندوز.", MUT, 11)))',
-                    '        self._add("auto", page(*cards_auto))',
-                    "",
-                    ""
-                ])
-                m = m[:a] + page_new + m[b_:]
-                break
-
-        m = m.replace('("هشدار" if not self.desktop else "ربات", "auto")', '("ربات و هشدار", "auto")')
-        m = m.replace('("هشدار", "auto")', '("ربات و هشدار", "auto")')
-
-        if 'self.cfg.get("bot_on")' not in m:
-            m = m.replace(
-                '        self.log("آماده است.")\n        return root\n',
-                '        self.log("آماده است.")\n        if self.bot and self.cfg.get("bot_on") and self.cfg.get("ua") and self.cfg.get("token") and self.cfg.get("vid"):\n            Clock.schedule_once(lambda dt: self.start_bot(), 2)\n        if os.name == "nt" and "--minimized" in sys.argv:\n            Clock.schedule_once(lambda dt: self._minimize(), 3)\n        return root\n',
-                1
-            )
-
-        bot_methods = "\n".join([
-            "    def _bot_mod(self):",
-            "        try:",
-            '            os.environ.setdefault("SNAPP_BOT_DIR", self.out_dir())',
-            "            import bot",
-            "            return bot",
-            "        except Exception:",
-            "            return None",
-            "",
-            "    def _bot_cfg(self):",
-            "        cfg = dict(self.bot.DEFAULT)",
-            "        cfg.update(self.bot.jload(self.bot.CFG, {}))",
-            '        cfg.update({"user_agent": self.ent_ua.text.strip(), "token": self.ent_token.text.strip(),',
-            '                    "vendor_id": self.ent_vid.text.strip()})',
-            "        return cfg",
-            "",
-            "    def _attach_bot_log(self):",
-            "        if self._bot_log_ready:",
-            "            return",
-            '        lg = logging.getLogger("bot")',
-            "        lg.setLevel(logging.INFO)",
-            "        lg.addHandler(GuiLogHandler(self))",
-            "        try:",
-            '            fh = RotatingFileHandler(os.path.join(self.out_dir(), "bot.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")',
-            '            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))',
-            "            lg.addHandler(fh)",
-            "        except Exception:",
-            "            pass",
-            "        self._bot_log_ready = True",
-            "",
-            "    def _bot_label(self, on):",
-            "        if hasattr(self, 'bot_lbl'):",
-            '            self.bot_lbl.text = fa("وضعیت ربات: فعال" if on else "وضعیت ربات: خاموش")',
-            "            self.bot_lbl.color = GRN if on else MUT",
-            "",
-            "    def start_bot(self):",
-            "        if not self.bot or self.bot_obj is not None:",
-            "            return",
-            "        if not self._need_vid():",
-            "            return",
-            "        self._attach_bot_log()",
-            "        b = self.bot.Bot(self._bot_cfg())",
-            "        self.bot_obj = b",
-            '        self.cfg["bot_on"] = True',
-            "        self._save()",
-            "        self._bot_label(True)",
-            '        self.log("ربات پس‌زمینه فعال شد.", "ok")',
-            "        def run():",
-            "            rc = None",
-            "            try:",
-            "                rc = b.run()",
-            "            except Exception:",
-            '                self.ui(lambda: self.log("خطا در اجرای ربات پس‌زمینه.", "err"))',
-            "            def done():",
-            "                if self.bot_obj is b:",
-            "                    self.bot_obj = None",
-            "                    self._bot_label(False)",
-            "                if rc == 2:",
-            '                    self.log("توکن معتبر نیست؛ ربات متوقف شد.", "err")',
-            "            self.ui(done)",
-            "        threading.Thread(target=run, daemon=True).start()",
-            "",
-            "    def stop_bot(self):",
-            "        if self.bot_obj is not None:",
-            "            self.bot_obj.stop()",
-            "            self.bot_obj = None",
-            '        self.cfg["bot_on"] = False',
-            "        self._save()",
-            "        self._bot_label(False)",
-            '        self.log("ربات متوقف شد.")',
-            "",
-            "    def _dry_text(self):",
-            "        if hasattr(self, 'dry_btn') and self.bot:",
-            '            dry = bool(self.bot.jload(self.bot.CFG, {}).get("prices_dry_run", True))',
-            '            self.dry_btn.set_text("حالت بروزرسانی قیمت: " + ("آزمایشی (بدون اعمال در سایت)" if dry else "فعال (اعمال مستقیم در اسنپ‌شاپ)"))',
-            "",
-            "    def toggle_dry(self):",
-            "        if not self.bot:",
-            "            return",
-            "        c = self.bot.jload(self.bot.CFG, {})",
-            '        c["prices_dry_run"] = not c.get("prices_dry_run", True)',
-            "        self.bot.jsave(self.bot.CFG, c)",
-            "        self._dry_text()",
-            '        self.log("حالت بروزرسانی قیمت به " + ("«آزمایشی»" if c["prices_dry_run"] else "«اعمال مستقیم در سایت»") + " تغییر کرد.", "ok")',
-            "",
-            "    def _win_text(self):",
-            "        if hasattr(self, 'win_btn'):",
-            '            self.win_btn.set_text("اجرای خودکار با روشن شدن ویندوز: " + ("فعال" if self.cfg.get("winstart") else "غیرفعال"))',
-            "",
-            "    def toggle_winstart(self):",
-            '        on = not self.cfg.get("winstart")',
-            '        if on and not getattr(sys, "frozen", False):',
-            '            self.log("این قابلیت فقط در فایل اجرایی ویندوز (EXE) فعال می‌شود.", "err")',
-            "            return",
-            "        try:",
-            "            self.bot.startup(on)",
-            "        except Exception:",
-            '            self.log("خطا در تغییر تنظیمات استارت‌آپ ویندوز.", "err")',
-            "            return",
-            '        self.cfg["winstart"] = on',
-            "        self._save()",
-            "        self._win_text()",
-            '        self.log("اجرای خودکار با ویندوز " + ("فعال شد." if on else "غیرفعال شد."), "ok")',
-            "",
-            "    def bot_export(self):",
-            "        if not self.bot or not self._need_vid():",
+        # Clean raw json.dumps in update_product()
+        m = m.replace(
+            '        def f():\n            r = self.api.update_products(self.vendor_id, [{"sku": sku, "stock": int(st), "price": int(pr)}])\n            self.log("به‌روزرسانی انجام شد.\\n" + json.dumps(r, ensure_ascii=False, indent=2), "ok")',
+            '        def f():\n            self.ap
