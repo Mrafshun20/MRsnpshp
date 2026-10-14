@@ -203,14 +203,17 @@ class Bot:
         limit = float(self.cfg.get("max_price_change_pct", 50))
         items, lines, skipped = [], [], 0
         for r in rows:
-            p = by_sku.get(r.get("sku", "")) if r.get("sku") else None
-            if p is None and r.get("id"):
-                p = by_id.get(r["id"])
+            r_sku = r.get("sku") or r.get("کد کالا (sku)") or ""
+            r_id = r.get("id") or r.get("شناسه محصول") or ""
+            p = by_sku.get(r_sku) if r_sku else None
+            if p is None and r_id:
+                p = by_id.get(r_id)
             if p is None:
-                if r.get("sku") or r.get("id"):
-                    log.warning("prices.csv: product not found: %s", r.get("sku") or r.get("id"))
+                if r_sku or r_id:
+                    log.warning("prices.csv: product not found: %s", r_sku or r_id)
                 continue
-            price, stock = L.to_num(r.get("price")), L.to_num(r.get("stock"))
+            price = L.to_num(r.get("price") if "price" in r else r.get("قیمت فروش (تومان)"))
+            stock = L.to_num(r.get("stock") if "stock" in r else r.get("موجودی"))
             np_ = int(price) if price is not None else p.price
             ns = int(stock) if stock is not None else p.stock
             if np_ is None or ns is None or np_ <= 0 or ns < 0:
@@ -222,9 +225,9 @@ class Bot:
                 skipped += 1
                 continue
             extra = {}
-            sp = L.to_num(r.get("special_price"))
+            sp = L.to_num(r.get("special_price") if "special_price" in r else r.get("قیمت ویژه (تومان)"))
             if sp is not None and sp > 0:
-                st, en = r.get("special_start", "")[:10] or p.sp_start[:10], r.get("special_end", "")[:10] or p.sp_end[:10]
+                st, en = (r.get("special_start") or r.get("شروع قیمت ویژه") or "")[:10] or p.sp_start[:10], (r.get("special_end") or r.get("پایان قیمت ویژه") or "")[:10] or p.sp_end[:10]
                 if (int(sp), st, en) != (int(p.sp or 0), p.sp_start[:10], p.sp_end[:10]):
                     extra["special_price"] = int(sp)
                     if st:

@@ -3,7 +3,7 @@ import csv, datetime, json, logging, ntpath, os, re, shutil, site, sys, threadin
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple, Union
-import requests
+import core
 _HERE0 = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 if sys.stdout is None: sys.stdout = open(os.devnull, 'w')
 if sys.stderr is None: sys.stderr = open(os.devnull, 'w')
@@ -43,8 +43,10 @@ try:
 except ImportError:
     from bidi import get_display
 
-from logic import (build_sales_workbook, first_array, flat, make_xlsx_multi, norm_order, norm_prod,
-                   plan_auto, plan_undercut, read_mins_csv, redact, write_mins_csv)
+from logic import to_num as norm_num
+from logic import (build_sales_workbook, event_line, fa_status, first_array, flat, make_xlsx_multi, norm_order,
+                   norm_prod, plan_auto, plan_undercut, products_export_rows, read_mins_csv, redact,
+                   summarize_patch, to_jalali, write_mins_csv)
 
 # ---------------- theme ----------------
 BG = (0.055, 0.07, 0.11, 1)
@@ -79,68 +81,32 @@ def n(x) -> str:
 
 # ---------------- API ----------------
 class SnappShopAutomationAPI:
-    BASE_URL = "https://apix.snappshop.ir/automation/v1"
+    """Thin wrapper over core.Client (stdlib only: works identically on Android and Windows)."""
 
     def __init__(self, unique_id: str, bearer_token: str):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": unique_id.strip(),
-            "Authorization": f"Bearer {bearer_token.strip()}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
+        self.c = core.Client(unique_id, bearer_token)
 
     def _request(self, method: str, endpoint: str, **kw) -> Any:
-        r = self.session.request(method, f"{self.BASE_URL}/{endpoint.lstrip('/')}", timeout=20, **kw)
-        r.raise_for_status()
-        return r.json()
+        return self.c.request(method, endpoint, kw.get("params"), kw.get("json"))
 
     def get_first_vendor_id(self) -> Optional[str]:
-        v = self._request("GET", "vendors").get("data", [])
+        v = self.c.vendors()
         return v[0].get("id") if v else None
 
     def get_all_products(self, vid: str) -> List[Dict[str, Any]]:
-        out, page = [], 1
-        while True:
-            res = self._request("GET", f"vendors/{vid}/products", params={"page": page})
-            d = res.get("data", [])
-            if not d:
-                break
-            out.extend(d)
-            if page >= res.get("meta", {}).get("pagination", {}).get("total_pages", 1):
-                break
-            page += 1
-        return out
+        return self.c.products(vid)
 
     def update_products(self, vid: str, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        out = []
-        for i in range(0, len(products), 50):
-            res = self._request("PATCH", f"vendors/{vid}/products", json={"products": products[i:i + 50]})
-            out.extend(res.get("data", []))
-        return out
+        return self.c.patch_products(vid, products)
 
     def get_all_latest_events(self, vid: str) -> List[Dict[str, Any]]:
-        ev, cursor = [], None
-        while True:
-            res = self._request("GET", f"vendors/{vid}/orders/events", params={"cursor": cursor} if cursor else {})
-            b = res.get("data", [])
-            if not b:
-                break
-            ev.extend(b)
-            m = res.get("meta", {}).get("pagination", {})
-            if not m.get("has_more") or not m.get("next_cursor"):
-                break
-            cursor = m["next_cursor"]
-        return ev
+        return self.c.events(vid)[0]
 
     def get_order_details(self, vid: str, num) -> Any:
-        return self._request("GET", f"vendors/{vid}/orders/{num}")
+        return self.c.order(vid, num)
 
     def get_orders_history(self, vid: str, s=None, e=None) -> Any:
-        p = {}
-        if s: p["start_date"] = s
-        if e: p["end_date"] = e
-        return self._request("GET", f"vendors/{vid}/orders", params=p)
+        return self.c.orders(vid, s, e)  # follows every page (20 per page)
 
 
 # ---------------- widgets ----------------
@@ -298,25 +264,6 @@ class StatusBar(ButtonBehavior, Label):
     pass
 
 
-import logging
-from logging.handlers import RotatingFileHandler
-
-class GuiLogHandler(logging.Handler):
-    """Shows the bot's log lines inside the app's report tab."""
-    def __init__(self, app):
-        super().__init__(logging.INFO)
-        self.app = app
-        self.setFormatter(logging.Formatter("%(message)s"))
-
-    def emit(self, r):
-        try:
-            msg = self.format(r)
-            kind = "err" if r.levelno >= logging.WARNING else ("ok" if "NEW_ORDER" in msg else "info")
-            self.app.log(msg, kind)
-        except Exception:
-            pass
-
-
 class ProdCard(Bg):
     def __init__(self, o, app, **kw):
         super().__init__(color=CARD, radius=12, orientation="vertical", size_hint_y=None,
@@ -382,7 +329,8 @@ class SnappShopApp(App):
                 cfg = json.load(f)
         except Exception:
             cfg = {}
-        self.auto_cfg = {"bot": False, "interval": 10, "delta": 5000, "maxdrop": 15, "reqmin": True, "winstart": False}
+        self.auto_cfg = {"bot": False, "interval": 10, "delta": 5000, "maxdrop": 15, "reqmin": True, "winstart": False,
+                         "events": True, "report_time": "23:30", "low_stock": 3, "beep": True}
         self.auto_cfg.update(cfg.get("auto", {}))
         try:
             with open(self.mins_path) as f:
@@ -480,6 +428,8 @@ class SnappShopApp(App):
         self.ent_bi = inp("Minutes", str(c["interval"]), input_filter="int")
         self.ent_bd = inp("Toman", str(c["delta"]), input_filter="int")
         self.ent_bm = inp("%", str(c["maxdrop"]), input_filter="int")
+        self.ent_rt = inp("23:30", str(c.get("report_time", "")))
+        self.ent_ls = inp("3", str(c.get("low_stock", 3)), input_filter="int")
         self.reqmin_btn = RBtn("", ACC2)
         self._reqmin_text()
         self.reqmin_btn.bind(on_release=lambda *_: self.toggle_reqmin())
@@ -498,11 +448,13 @@ class SnappShopApp(App):
                         lab("هر چند دقیقه یک بار بررسی کند", MUT, 12), self.ent_bi,
                         lab("چند تومان زیر نفر اول", MUT, 12), self.ent_bd,
                         lab("حداکثر افت قیمت در هر بار (درصد)", MUT, 12), self.ent_bm,
+                        lab("ساعت ساخت خودکار گزارش فروش روزانه (مثلاً 23:30؛ خالی = خاموش)", MUT, 12), self.ent_rt,
+                        lab("هشدار کالاهای رو به اتمام: موجودی کمتر یا مساوی", MUT, 12), self.ent_ls,
                         self.reqmin_btn, self.bot_lbl, self.bot_last, bs4, bs1, bs2, bs3,
                         lab("ربات فقط کالاهایی را که بای‌باکس ندارند، فعال و موجودند و قیمت نفر اول‌شان معلوم است تغییر می‌دهد، آن هم فقط اگر قیمت جدید از «حداقل قیمت» کمتر نشود. هر تغییر در تاریخچه ثبت می‌شود.", MUT, 11))
         self.mins_lbl = lab("", MUT, 12)
         mcards = [self.mins_lbl]
-        if platform != "android":
+        if True:
             mb1 = RBtn("ساخت فایل حداقل قیمت (CSV برای Excel)", ACC2)
             mb1.bind(on_release=lambda *_: self.export_mins())
             mb2 = RBtn("بارگذاری حداقل قیمت‌ها از فایل", ACC2)
@@ -514,7 +466,13 @@ class SnappShopApp(App):
         mins_card = card("حداقل قیمت هر کالا", *mcards)
         hb = RBtn("تاریخچه‌ی قیمت‌گذاری ربات (Excel)", ACC2)
         hb.bind(on_release=lambda *_: self.export_history())
-        cards_bot = [bot_card, mins_card, card("گزارش", hb)]
+        b_exp = RBtn("فایل اکسل همه محصولات (قیمت، موجودی، تخفیف)", ACC2)
+        b_exp.bind(on_release=lambda *_: self.bot_export())
+        b_rep = RBtn("گزارش فروش امروز + کالاهای رو به اتمام (Excel)", (0.20, 0.65, 0.35, 1))
+        b_rep.bind(on_release=lambda *_: self.bot_report())
+        b_fld = RBtn("باز کردن پوشه فایل‌ها", ACC2)
+        b_fld.bind(on_release=lambda *_: self.open_folder())
+        cards_bot = [bot_card, mins_card, card("خروجی‌ها و گزارش‌ها", b_exp, b_rep, hb, b_fld)]
         if platform == "win":
             self.winstart_btn = RBtn("", ACC2)
             self._winstart_text()
@@ -595,7 +553,26 @@ class SnappShopApp(App):
         except Exception:
             pass
 
+    @staticmethod
+    def friendly(text):
+        t = str(text)
+        if "HTTP 401" in t or "HTTP 403" in t:
+            return "توکن یا کد یکتا (User-Agent) معتبر نیست؛ در تب «اتصال» بررسی کنید.", "err"
+        if "network error" in t or "timed out" in t or "Name or service" in t:
+            return "ارتباط با سرور اسنپ‌شاپ برقرار نشد؛ اینترنت را بررسی کنید.", "err"
+        if "HTTP 422" in t:
+            return "اسنپ‌شاپ اطلاعات ارسالی را نپذیرفت (۴۲۲)؛ مقادیر را بررسی کنید.", "err"
+        if "HTTP 429" in t:
+            return "تعداد درخواست‌ها زیاد است؛ چند دقیقه بعد دوباره تلاش کنید.", "err"
+        if "HTTP 5" in t:
+            return "سرور اسنپ‌شاپ موقتاً در دسترس نیست؛ کمی بعد دوباره تلاش کنید.", "err"
+        return None
+
     def log(self, text, kind="info"):
+        fr = self.friendly(text) if kind == "err" else None
+        if fr:
+            self._flog(str(text), kind)
+            text, kind = fr
         self._flog(text, kind)
         def _do(_dt):
             self.log_box.add_widget(LogRow(time.strftime("%H:%M"), text, kind))
@@ -785,7 +762,7 @@ class SnappShopApp(App):
     def edit_product(self, o):
         ep = inp("Price", "" if o.price is None else str(int(o.price)), input_filter="int")
         es = inp("Stock", "" if o.stock is None else str(int(o.stock)), input_filter="int")
-        em = inp("Min", str(int(self.mins[o.sku])) if o.sku in self.mins else "", input_filter="int")
+        em = inp("Min", str(int(self.mins[o.key])) if o.key in self.mins else "", input_filter="int")
         body = vbox()
         for w in (lab("قیمت (تومان)", MUT, 12), ep, lab("موجودی", MUT, 12), es,
                   lab("حداقل قیمت برای ربات (اختیاری)", MUT, 12), em):
@@ -794,11 +771,11 @@ class SnappShopApp(App):
             pr = int(ep.text) if ep.text.strip() else None
             st = int(es.text) if es.text.strip() else None
             mn = int(em.text) if em.text.strip() else None
-            if o.sku:
+            if o.key:
                 if mn:
-                    self.mins[o.sku] = float(mn)
+                    self.mins[o.key] = float(mn)
                 else:
-                    self.mins.pop(o.sku, None)
+                    self.mins.pop(o.key, None)
                 self._save_mins()
                 self.upd_mins_lbl()
             unchanged = (pr is None or pr == o.price) and (st is None or st == o.stock)
@@ -808,21 +785,23 @@ class SnappShopApp(App):
                 return
             if not self._need_vid():
                 return False
-            if not o.sku:
-                self.log("کد کالا (SKU) پیدا نشد.", "err")
+            if not o.key:
+                self.log("شناسه کالا پیدا نشد.", "err")
                 return False
-            item = self._clean({"sku": o.sku, "price": pr if pr is not None else o.price,
-                                "stock": st if st is not None else o.stock})
+            item = o.item(pr if pr is not None else o.price, st if st is not None else o.stock)
             def f():
-                self.api.update_products(self.vendor_id, [item])
+                ok, bad = summarize_patch(self.api.update_products(self.vendor_id, [item]))
+                if bad:
+                    self.log(f"ذخیره نشد: {bad[0][1]}", "err")
+                    return
                 def done():
                     o.price, o.stock = item.get("price"), item.get("stock")
                     o.calc()
                     self.render_products()
-                    self.log(f"ذخیره شد: {o.sku}", "ok")
+                    self.log(f"ذخیره شد: {o.name[:40]}", "ok")
                 self.ui(done)
             self._run(f)
-        self.modal(o.name, o.sku, body, [("انصراف", ACC2, None), ("ذخیره", ACC, save)], h=0.72)
+        self.modal(o.name, o.key, body, [("انصراف", ACC2, None), ("ذخیره", ACC, save)], h=0.72)
 
     @staticmethod
     def _fnum(text):
@@ -874,9 +853,9 @@ class SnappShopApp(App):
                     if newp <= 0:
                         continue
                 news = int(stk) if stk is not None else o.stock
-                if mp is not None and o.sku and newp is not None:
-                    self.mins[o.sku] = float(int(round(newp * (1 - mp / 100))))
-                if o.sku and (newp != o.price or news != o.stock):
+                if mp is not None and o.key and newp is not None:
+                    self.mins[o.key] = float(int(round(newp * (1 - mp / 100))))
+                if o.key and newp is not None and news is not None and (newp != o.price or news != o.stock):
                     changes.append((o, newp, news))
             self._save_mins()
             self.upd_mins_lbl()
@@ -886,11 +865,13 @@ class SnappShopApp(App):
                 self.render_products()
                 self.log("حداقل قیمت‌ها ثبت شد." if mp is not None else "تغییری لازم نبود.", "ok")
                 return
-            items = [self._clean({"sku": o.sku, "price": p, "stock": st}) for o, p, st in changes]
+            items = [o.item(p, st) for o, p, st in changes]
             self.go("log")
             self.log(f"در حال اعمال ویرایش گروهی روی {len(items)} کالا...")
             def f():
-                self.api.update_products(self.vendor_id, items)
+                ok, bad = summarize_patch(self.api.update_products(self.vendor_id, items))
+                if bad:
+                    self.log(f"{len(bad)} کالا ناموفق بود: {bad[0][1]}", "err")
                 def done():
                     for o, p, st in changes:
                         o.price, o.stock = p, st
@@ -913,7 +894,11 @@ class SnappShopApp(App):
             return
         def f():
             r = self.api.update_products(self.vendor_id, [{"sku": sku, "stock": int(st), "price": int(pr)}])
-            self.log("به‌روزرسانی انجام شد.\n" + json.dumps(r, ensure_ascii=False, indent=2), "ok")
+            ok, bad = summarize_patch(r)
+            if bad:
+                self.log(f"کالا «{bad[0][0]}» به‌روزرسانی نشد: {bad[0][1]}", "err")
+            else:
+                self.log(f"قیمت و موجودی کالای {sku} به‌روزرسانی شد.", "ok")
         self._run(f)
 
     # ---- undercut
@@ -964,7 +949,7 @@ class SnappShopApp(App):
                 return
             self.go("log")
             self.log(f"در حال اعمال قیمت‌ها روی {len(chosen)} کالا...")
-            items = [self._clean({"sku": r["o"].sku, "price": r["np"], "stock": r["o"].stock}) for r in chosen]
+            items = [r["o"].item(r["np"], r["o"].stock or 0) for r in chosen]
             def f():
                 self.api.update_products(self.vendor_id, items)
                 def done():
@@ -1007,13 +992,13 @@ class SnappShopApp(App):
             addc("همه", "all", len(self.O))
             addc("ارسال‌شده، تحویل‌نشده", "snd", snd)
             for s, c in cnt.items():
-                addc(s or "—", "st:" + s, c)
+                addc(str(fa_status(s)) or "—", "st:" + s, c)
         L = [o for o in self.O if self.OF == "all" or (self.OF == "snd" and o.snd) or self.OF == "st:" + o.status]
         for o in L[:150]:
             c = TapBg(color=CARD, radius=12, orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(4))
             c.bind(minimum_height=c.setter("height"))
             c.add_widget(lab(f"سفارش {o.num}", bold=True, size=14))
-            c.add_widget(lab(o.date, MUT, 11))
+            c.add_widget(lab((to_jalali(o.date) + "  " + o.date[11:16]).strip() if to_jalali(o.date) else o.date, MUT, 11))
             meta = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(24), spacing=dp(6))
             meta.add_widget(BoxLayout())
             if o.total is not None:
@@ -1022,7 +1007,7 @@ class SnappShopApp(App):
                 tl.width = dp(150)
                 meta.add_widget(tl)
             if o.status:
-                meta.add_widget(badge(o.status, "g" if o.delivered else "o" if o.snd else "n"))
+                meta.add_widget(badge(str(fa_status(o.status)), "g" if o.delivered else "o" if o.snd else "n"))
             c.add_widget(meta)
             c.bind(on_release=lambda w, num=o.num: self.open_order(num))
             self.ol.add_widget(c)
@@ -1086,9 +1071,9 @@ class SnappShopApp(App):
             return
         def f():
             e = self.api.get_all_latest_events(self.vendor_id)
-            self.log(f"تعداد رویدادها: {len(e)}", "ok")
-            if e:
-                self.log(json.dumps(e, ensure_ascii=False, indent=2))
+            self.log(f"تعداد رویدادهای جدید سفارش: {len(e)}", "ok")
+            for x in e[-30:]:
+                self.log(event_line(x), "ok" if x.get("event_type") == "NEW_ORDER" else "info")
         self.go("log")
         self._run(f)
 
@@ -1134,9 +1119,10 @@ class SnappShopApp(App):
                         return d[k]
                 with ThreadPoolExecutor(4) as ex:
                     d = list(ex.map(one, range(len(ids))))
-            data = build_sales_workbook(d)
+            prods = self._prods_quiet()
+            data = build_sales_workbook(d, prods, int(self.auto_cfg.get("low_stock", 3)))
             shown = self.write_report("sales-" + time.strftime("%Y-%m-%d") + ".xlsx", data)
-            self.log(f"گزارش آماده شد (۳ شیت: ریز سفارشات، خلاصه کالا، خلاصه روزانه): {len(d)} سفارش.\n{shown}", "ok")
+            self.log(f"گزارش فروش آماده شد: {len(d)} سفارش (خلاصه روزانه، فروش هر کالا، ریز سفارشات، کالاهای رو به اتمام).\n{shown}", "ok")
         self.go("log")
         self.log("در حال دریافت سفارشات برای گزارش...")
         self._run(f)
@@ -1226,12 +1212,16 @@ class SnappShopApp(App):
             return
         path = os.path.join(self.out_dir(), "min_prices.csv")
         write_mins_csv(path, self.P, self.mins)
-        self.log("فایل ساخته شد:\n" + path + "\nدر Excel ستون min_price را پر کنید، با همین فرمت CSV ذخیره کنید و «بارگذاری» بزنید.", "ok")
+        shown = self.save_shared(path) if platform == "android" else path
+        self.log("فایل حداقل قیمت ساخته شد:\n" + str(shown) + "\nدر Excel ستون «حداقل قیمت مجاز» را پر کنید، با فرمت CSV و همان نام ذخیره (در پوشه Download) و «بارگذاری» بزنید.", "ok")
 
     def import_mins(self):
-        path = os.path.join(self.out_dir(), "min_prices.csv")
-        if not os.path.exists(path):
-            self.log("فایل پیدا نشد: " + path, "err")
+        cands = [os.path.join(self.out_dir(), "min_prices.csv")]
+        if platform == "android":
+            cands.insert(0, "/storage/emulated/0/Download/min_prices.csv")
+        path = next((c for c in cands if os.path.exists(c)), None)
+        if not path:
+            self.log("فایل min_prices.csv پیدا نشد؛ ابتدا «ساخت فایل حداقل قیمت» را بزنید.", "err")
             return
         try:
             m = read_mins_csv(path)
@@ -1249,6 +1239,9 @@ class SnappShopApp(App):
         c["interval"] = max(2, self._int(self.ent_bi.text, 10))
         c["delta"] = max(0, self._int(self.ent_bd.text, 5000))
         c["maxdrop"] = min(90, max(1, self._int(self.ent_bm.text, 15)))
+        rt = self.ent_rt.text.strip()
+        c["report_time"] = rt if re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", rt) else ""
+        c["low_stock"] = max(0, self._int(self.ent_ls.text, 3))
 
     def _set_bot_label(self, on):
         self.bot_lbl.text = fa("وضعیت ربات: روشن" if on else "وضعیت ربات: خاموش")
@@ -1315,13 +1308,17 @@ class SnappShopApp(App):
             return
         c = self.auto_cfg
         changes, skips = plan_auto(P, int(c["delta"]), self.mins, float(c["maxdrop"]), bool(c["reqmin"]))
-        by = {o.sku: o for o in P}
+        by = {o.key: o for o in P}
         if dry:
             for ch in changes[:15]:
                 self.log(f"{ch['sku']} {ch['name'][:30]}: {n(ch['old'])} ← {n(ch['new'])} (نفر اول {n(ch['comp'])})")
         elif changes:
-            items = [self._clean({"sku": x["sku"], "price": x["new"], "stock": by[x["sku"]].stock}) for x in changes]
-            self.api.update_products(self.vendor_id, items)
+            items = [by[x["key"]].item(x["new"], by[x["key"]].stock or 0) for x in changes]
+            ok, bad = summarize_patch(self.api.update_products(self.vendor_id, items))
+            if bad:
+                self.log(f"ربات: {len(bad)} کالا رد شد ({bad[0][1]})", "err")
+                failed = {k for k, _ in bad}
+                changes = [x for x in changes if x["key"] not in failed and x.get("sku") not in failed]
             self._history(changes)
         losing = sum(1 for o in P if o.lose)
         sk = " · ".join(f"{k}: {len(v)}" for k, v in skips.items())
@@ -1357,14 +1354,34 @@ class SnappShopApp(App):
         self._set_bot_label(True)
         self._keep_awake(True)
         iv = self.auto_cfg["interval"]
-        self.log(f"ربات روشن شد؛ هر {iv} دقیقه بررسی می‌کند.", "ok")
+        self.log(f"ربات روشن شد: سفارش‌های جدید هر ۱ دقیقه و قیمت‌ها هر {iv} دقیقه بررسی می‌شود.", "ok")
         def loop():
+            nxt = 0.0
             while not ev.is_set():
+                if self.auto_cfg.get("events", True):
+                    try:
+                        self.poll_events_app()
+                    except core.AuthError:
+                        self.log("توکن پذیرفته نشد؛ ربات متوقف شد.", "err")
+                        self.ui(self.stop_bot)
+                        return
+                    except Exception as e:
+                        self.log(f"خطا در بررسی سفارشات: {e}", "err")
+                if time.monotonic() >= nxt:
+                    try:
+                        self.reprice_cycle()
+                    except core.AuthError:
+                        self.log("توکن پذیرفته نشد؛ ربات متوقف شد.", "err")
+                        self.ui(self.stop_bot)
+                        return
+                    except Exception as e:
+                        self.log(f"خطا در ربات: {e}", "err")
+                    nxt = time.monotonic() + iv * 60
                 try:
-                    self.reprice_cycle()
+                    self.daily_report_app()
                 except Exception as e:
-                    self.log(f"خطا در ربات: {e}", "err")
-                ev.wait(iv * 60)
+                    self.log(f"خطا در گزارش روزانه: {e}", "err")
+                ev.wait(60)
         threading.Thread(target=loop, daemon=True).start()
 
     def stop_bot(self):
@@ -1393,133 +1410,120 @@ class SnappShopApp(App):
         shown = self.write_report("reprice-history-" + time.strftime("%Y-%m-%d") + ".xlsx", data)
         self.log(f"تاریخچه‌ی {len(rows)} تغییر ذخیره شد:\n{shown}", "ok")
 
-# ---- desktop bot (runs bot.Bot in a background thread)
-def _bot_mod(self):
-    os.environ.setdefault("SNAPP_BOT_DIR", self.out_dir())
-    import bot
-    return bot
-
-def _bot_cfg(self):
-    cfg = dict(self.bot.DEFAULT)
-    cfg.update(self.bot.jload(self.bot.CFG, {}))
-    cfg.update({"user_agent": self.ent_ua.text.strip(), "token": self.ent_token.text.strip(),
-                "vendor_id": self.ent_vid.text.strip()})
-    return cfg
-
-def _attach_bot_log(self):
-    if self._bot_log_ready:
-        return
-    lg = logging.getLogger("bot")
-    lg.setLevel(logging.INFO)
-    lg.addHandler(GuiLogHandler(self))
-    try:
-        fh = RotatingFileHandler(os.path.join(self.out_dir(), "bot.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
-        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        lg.addHandler(fh)
-    except Exception:
-        pass
-    self._bot_log_ready = True
-
-def _bot_label(self, on):
-    self.bot_lbl.text = fa("وضعیت ربات: روشن" if on else "وضعیت ربات: خاموش")
-    self.bot_lbl.color = GRN if on else MUT
-
-def start_bot(self):
-    if self.bot_obj is not None:
-        return
-    if not self._need_vid():
-        return
-    self._attach_bot_log()
-    b = self.bot.Bot(self._bot_cfg())
-    self.bot_obj = b
-    self.cfg["bot_on"] = True
-    self._save()
-    self._bot_label(True)
-    def run():
-        rc = None
+    # ---- order alerts / reports / exports (same on Android and Windows)
+    def _prods_quiet(self):
         try:
-            rc = b.run()
+            return [norm_prod(p, i) for i, p in enumerate(self.api.get_all_products(self.vendor_id))]
         except Exception as e:
-            self.log(f"خطا در ربات: {e}", "err")
-        def done():
-            if self.bot_obj is b:
-                self.bot_obj = None
-                self._bot_label(False)
-            if rc == 2:
-                self.log("توکن پذیرفته نشد؛ ربات متوقف شد.", "err")
-        self.ui(done)
-    threading.Thread(target=run, daemon=True).start()
+            self.log(f"لیست محصولات برای گزارش در دسترس نبود: {e}", "err")
+            return None
 
-def stop_bot(self):
-    if self.bot_obj is not None:
-        self.bot_obj.stop()
-        self.bot_obj = None
-    self.cfg["bot_on"] = False
-    self._save()
-    self._bot_label(False)
-    self.log("ربات خاموش شد.")
+    def _beep(self, kind):
+        if platform != "win" or not self.auto_cfg.get("beep", True):
+            return
+        try:
+            import winsound
+            for f in ((1200, 1200) if kind == "NEW_ORDER" else (500,)):
+                winsound.Beep(f, 250)
+        except Exception:
+            pass
 
-def _dry_text(self):
-    dry = bool(self.bot.jload(self.bot.CFG, {}).get("prices_dry_run", True))
-    self.dry_btn.set_text("اعمال prices.csv: " + ("فقط آزمایشی (چیزی تغییر نمیکند)" if dry else "واقعی (تغییرات ارسال میشود)"))
+    def poll_events_app(self):
+        c = self.auto_cfg
+        first = not c.get("events_init")
+        evs, last = self.api.c.events(self.vendor_id, c.get("events_cursor"))
+        if last:
+            c["events_cursor"] = last
+        c["events_init"] = True
+        self._save()
+        if first:
+            self.log(f"پایش سفارشات فعال شد؛ از این لحظه سفارش‌های جدید و لغوها اعلام می‌شود ({len(evs)} رویداد قدیمی نادیده گرفته شد).", "ok")
+            return
+        for e in evs:
+            t = e.get("event_type")
+            if t not in ("NEW_ORDER", "CANCELLATION", "CHANGE_STATUS"):
+                continue
+            self.log(("🛒 " if t == "NEW_ORDER" else "⚠️ " if t == "CANCELLATION" else "") + event_line(e),
+                     "ok" if t == "NEW_ORDER" else "err" if t == "CANCELLATION" else "info")
+            if t in ("NEW_ORDER", "CANCELLATION"):
+                self._order_log(e)
+                self._beep(t)
 
-def toggle_dry(self):
-    c = self.bot.jload(self.bot.CFG, {})
-    c["prices_dry_run"] = not c.get("prices_dry_run", True)
-    self.bot.jsave(self.bot.CFG, c)
-    self._dry_text()
-    self.log("prices.csv حالا " + ("آزمایشی است." if c["prices_dry_run"] else "واقعی است؛ تغییرات روی اسنپشاپ اعمال میشود."), "ok" if c["prices_dry_run"] else "err")
+    def _order_log(self, e):
+        path = os.path.join(self.out_dir(), "orders_log.csv")
+        new = not os.path.exists(path)
+        items = [i for i in (e.get("items") or []) if isinstance(i, dict)]
+        tot = sum((norm_num(i.get("final_price")) or 0) for i in items)
+        with open(path, "a", newline="", encoding="utf-8-sig" if new else "utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["زمان ثبت", "نوع رویداد", "شماره سفارش", "تاریخ رویداد (شمسی)", "ساعت", "تعداد ردیف کالا", "مبلغ کل (تومان)"])
+            ea = str(e.get("event_at") or "")
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), fa_status(e.get("event_type")), e.get("order_number"),
+                        to_jalali(ea), ea[11:16], len(items), int(tot)])
 
-def _win_text(self):
-    self.win_btn.set_text("اجرا با روشن شدن ویندوز: " + ("بله" if self.cfg.get("winstart") else "خیر"))
+    def _make_report(self, days=1):
+        today = datetime.date.today()
+        start = (today - datetime.timedelta(days=days - 1)).isoformat()
+        orders = self.api.get_orders_history(self.vendor_id, start, today.isoformat())
+        orders = orders.get("data", orders) if isinstance(orders, dict) else orders
+        data = build_sales_workbook(orders or [], self._prods_quiet(), int(self.auto_cfg.get("low_stock", 3)))
+        shown = self.write_report("sales-" + today.isoformat() + ".xlsx", data)
+        return len(orders or []), shown
 
-def toggle_winstart(self):
-    on = not self.cfg.get("winstart")
-    if on and not getattr(sys, "frozen", False):
-        self.log("این گزینه فقط در نسخهی EXE کار میکند.", "err")
-        return
-    try:
-        self.bot.startup(on)
-    except Exception as e:
-        self.log(f"تنظیم اجرای خودکار ناموفق بود: {e}", "err")
-        return
-    self.cfg["winstart"] = on
-    self._save()
-    self._win_text()
-    self.log("اجرا با روشن شدن ویندوز " + ("فعال شد." if on else "غیرفعال شد."), "ok")
+    def daily_report_app(self):
+        rt = str(self.auto_cfg.get("report_time") or "")
+        today = time.strftime("%Y-%m-%d")
+        if not rt or self.auto_cfg.get("last_report") == today:
+            return
+        hh, mm = rt.split(":")
+        if time.localtime().tm_hour * 60 + time.localtime().tm_min < int(hh) * 60 + int(mm):
+            return
+        cnt, shown = self._make_report(1)
+        self.auto_cfg["last_report"] = today
+        self._save()
+        self.log(f"گزارش فروش امروز ساخته شد ({cnt} سفارش):\n{shown}", "ok")
 
-def bot_export(self):
-    if not self._need_vid():
-        return
-    self._attach_bot_log()
-    self.go("log")
-    self._run(lambda: self.bot.Bot(self._bot_cfg()).export_products())
+    def bot_report(self):
+        if not self._need_vid():
+            return
+        def f():
+            cnt, shown = self._make_report(1)
+            self.log(f"گزارش فروش امروز ({cnt} سفارش) به‌همراه کالاهای رو به اتمام ساخته شد:\n{shown}", "ok")
+        self.go("log")
+        self.log("در حال ساخت گزارش فروش...")
+        self._run(f)
 
-def bot_report(self):
-    if not self._need_vid():
-        return
-    self._attach_bot_log()
-    self.go("log")
-    self._run(lambda: self.bot.Bot(self._bot_cfg()).report(force=True))
+    def bot_export(self):
+        if not self._need_vid():
+            return
+        def f():
+            prods = self._prods_quiet() or []
+            cols, rows = products_export_rows(prods)
+            for r, o in zip(rows, prods):
+                if o.key in self.mins:
+                    r["حداقل قیمت مجاز (تومان)"] = int(self.mins[o.key])
+            shown = self.write_report("products-" + time.strftime("%Y-%m-%d") + ".xlsx",
+                                      make_xlsx_multi([("محصولات", cols, rows)]))
+            self.log(f"فایل اکسل {len(rows)} محصول ساخته شد:\n{shown}", "ok")
+        self.go("log")
+        self.log("در حال دریافت محصولات...")
+        self._run(f)
 
-def open_folder(self):
-    d = self.out_dir()
-    try:
-        if os.name == "nt":
-            os.startfile(d)
-        else:
-            import subprocess
-            subprocess.Popen(["xdg-open", d])
-    except Exception as e:
-        self.log(f"پوشه: {d} ({e})", "info")
+    def open_folder(self):
+        d = self.out_dir()
+        try:
+            if os.name == "nt":
+                os.startfile(d)
+            elif platform == "android":
+                self.log("فایل‌ها در پوشه Download گوشی ذخیره می‌شوند.", "info")
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", d])
+        except Exception as e:
+            self.log(f"پوشه: {d} ({e})", "info")
 
-def _minimize(self):
-    try:
-        Window.minimize()
-    except Exception:
-        pass
-
-def on_pause(self):
+    def on_pause(self):
         return True
 
 
