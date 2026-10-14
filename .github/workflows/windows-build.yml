@@ -24,10 +24,10 @@ jobs:
       shell: bash
       run: |
         python - << 'EOF'
-        import pathlib, re, py_compile
+        import pathlib, re, py_compile, textwrap
 
-        # --- 1. Patch bot.py for GUI background thread compatibility ---
-        b = pathlib.Path("bot.py").read_text(encoding="utf-8")
+        # --- 1. Patch bot.py ---
+        b = pathlib.Path("bot.py").read_text(encoding="utf-8").replace("\r\n", "\n")
         if "SNAPP_BOT_DIR" not in b:
             b = b.replace(
                 'APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))',
@@ -59,9 +59,9 @@ jobs:
             )
         pathlib.Path("bot.py").write_text(b, encoding="utf-8")
 
-        # --- 2. Patch main.py with Windows DLL fixes + Desktop Bot Tab ---
-        m = pathlib.Path("main.py").read_text(encoding="utf-8")
-        head_old = "# -*- coding: utf-8 -*-\nimport datetime, json, os, shutil, sys, threading, time\nfrom typing import Any, Dict, List\n"
+        # --- 2. Patch main.py (Unconditional Header Injection) ---
+        m = pathlib.Path("main.py").read_text(encoding="utf-8").replace("\r\n", "\n")
+
         head_new = '''# -*- coding: utf-8 -*-
         import datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time
         from logging.handlers import RotatingFileHandler
@@ -91,18 +91,23 @@ jobs:
                         except Exception:
                             pass
         '''
-        import textwrap
-        if m.startswith(head_old):
-            m = textwrap.dedent(head_new).lstrip() + m[len(head_old):]
+        # Strip everything before "from kivy.app import App" and prepend head_new guaranteed
+        kivy_idx = m.find("from kivy.app import App")
+        assert kivy_idx != -1, "Could not find Kivy import in main.py"
+        m = textwrap.dedent(head_new).lstrip() + "\n" + m[kivy_idx:]
 
         # Fix Persian hint_text in inp()
-        m = m.replace(
-            'def inp(hint, text="", **kw):\n    return TextInput(hint_text=hint,',
-            'def inp(hint, text="", **kw):\n    has_fa = bool(re.search("[\\u0600-\\u06FF]", str(hint)))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign="right" if has_fa else "left",'
+        m = re.sub(
+            r'def inp\(hint,\s*text="",\s*\*\*kw\):\s*\n\s*return TextInput\(hint_text=hint,',
+            'def inp(hint, text="", **kw):\n    has_fa = bool(re.search("[\\u0600-\\u06FF]", str(hint)))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign="right" if has_fa else "left",',
+            m
         )
 
-        if "class GuiLogHandler" not in m:
-            gui_log_cls = '''class GuiLogHandler(logging.Handler):
+        # Ensure GuiLogHandler has logging imported right next to it too
+        gui_log_cls = '''import logging
+        from logging.handlers import RotatingFileHandler
+
+        class GuiLogHandler(logging.Handler):
             """Shows the bot's log lines inside the app's report tab."""
             def __init__(self, app):
                 super().__init__(logging.INFO)
@@ -119,7 +124,11 @@ jobs:
 
 
         class ProdCard(Bg):'''
+
+        if "class GuiLogHandler" not in m:
             m = m.replace("class ProdCard(Bg):", textwrap.dedent(gui_log_cls).lstrip(), 1)
+        elif "import logging\nfrom logging.handlers import RotatingFileHandler\n\nclass GuiLogHandler" not in m:
+            m = m.replace("class GuiLogHandler(logging.Handler):", "import logging\nfrom logging.handlers import RotatingFileHandler\n\nclass GuiLogHandler(logging.Handler):", 1)
 
         if "self.desktop =" not in m:
             m = m.replace(
@@ -318,10 +327,13 @@ jobs:
 
         pathlib.Path("main.py").write_text(m, encoding="utf-8")
 
+        # Verify syntax and verify 'import logging' is present
+        assert "import datetime, json, logging, ntpath" in m, "Header injection failed!"
         py_compile.compile("bot.py", doraise=True)
         py_compile.compile("main.py", doraise=True)
         py_compile.compile("core.py", doraise=True)
-        print("All modules compiled and unified successfully!")
+        py_compile.compile("logic.py", doraise=True)
+        print("Verified: logging and Windows DLL fixes are injected at line 1 of main.py!")
         EOF
 
     - name: Commit unified files back to repository
@@ -329,7 +341,7 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git add bot.py main.py
-        git diff --staged --quiet || git commit -m "Unify desktop bot engine with GUI"
+        git diff --staged --quiet || git commit -m "Fix logging import and Windows header in main.py"
         git push || true
 
     - name: Install dependencies
@@ -349,4 +361,3 @@ jobs:
       with:
         name: SnappShop-Windows-App
         path: dist/main.exe
-        
