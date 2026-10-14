@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 
@@ -22,7 +23,7 @@ import core
 import logic as L
 
 FROZEN = getattr(sys, "frozen", False)
-APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.environ.get("SNAPP_BOT_DIR") or (os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__)))
 def P(name): return os.path.join(APP_DIR, name)
 CFG, STATE, PRICES = P("config.json"), P("state.json"), P("prices.csv")
 EXPORT, ORDERS_LOG, REPORTS = P("prices_export.csv"), P("orders_log.csv"), P("reports")
@@ -81,7 +82,7 @@ def startup(on: bool):
         print("Windows only.")
         return
     import winreg
-    cmd = (f'cmd /c start "" /min "{sys.executable}"' if FROZEN
+    cmd = (f'cmd /c start "" /min "{sys.executable}" --minimized' if FROZEN
            else f'cmd /c start "" /min "{sys.executable}" "{os.path.abspath(__file__)}"')
     k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
     if on:
@@ -123,6 +124,10 @@ class Bot:
         self.client = core.Client(cfg["user_agent"], cfg["token"])
         self.vid = cfg["vendor_id"]
         self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0
+        self.stop_ev = threading.Event()
+
+    def stop(self):
+        self.stop_ev.set()
 
     def save_state(self):
         jsave(STATE, self.state)
@@ -301,7 +306,7 @@ class Bot:
         log.info("Bot started. Store %s. Orders check every %ss. prices_dry_run=%s",
                  self.vid, self.cfg.get("events_interval_sec"), self.cfg.get("prices_dry_run"))
         last_ev = 0.0
-        while True:
+        while not self.stop_ev.is_set():
             now = time.monotonic()
             try:
                 if once or now - last_ev >= max(15, int(self.cfg.get("events_interval_sec", 60))):
@@ -313,7 +318,9 @@ class Bot:
                 return 2
             if once:
                 return 0
-            time.sleep(10)
+            if self.stop_ev.wait(10):
+                log.info("Bot stopped.")
+                return 0
             self.reload_cfg()
 
 
@@ -325,6 +332,7 @@ def main(argv=None):
     ap.add_argument("--setup", action="store_true", help="re-run first-time setup")
     ap.add_argument("--install-startup", action="store_true", help="start with Windows")
     ap.add_argument("--uninstall-startup", action="store_true")
+    ap.add_argument("--minimized", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     setup_logging()
     if a.install_startup or a.uninstall_startup:

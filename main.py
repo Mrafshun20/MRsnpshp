@@ -298,6 +298,22 @@ class StatusBar(ButtonBehavior, Label):
     pass
 
 
+class GuiLogHandler(logging.Handler):
+    """Shows the bot's log lines inside the app's report tab."""
+    def __init__(self, app):
+        super().__init__(logging.INFO)
+        self.app = app
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, r):
+        try:
+            msg = self.format(r)
+            kind = "err" if r.levelno >= logging.WARNING else ("ok" if "NEW_ORDER" in msg else "info")
+            self.app.log(msg, kind)
+        except Exception:
+            pass
+
+
 class ProdCard(Bg):
     def __init__(self, o, app, **kw):
         super().__init__(color=CARD, radius=12, orientation="vertical", size_hint_y=None,
@@ -1374,7 +1390,133 @@ class SnappShopApp(App):
         shown = self.write_report("reprice-history-" + time.strftime("%Y-%m-%d") + ".xlsx", data)
         self.log(f"تاریخچه‌ی {len(rows)} تغییر ذخیره شد:\n{shown}", "ok")
 
-    def on_pause(self):
+# ---- desktop bot (runs bot.Bot in a background thread)
+def _bot_mod(self):
+    os.environ.setdefault("SNAPP_BOT_DIR", self.out_dir())
+    import bot
+    return bot
+
+def _bot_cfg(self):
+    cfg = dict(self.bot.DEFAULT)
+    cfg.update(self.bot.jload(self.bot.CFG, {}))
+    cfg.update({"user_agent": self.ent_ua.text.strip(), "token": self.ent_token.text.strip(),
+                "vendor_id": self.ent_vid.text.strip()})
+    return cfg
+
+def _attach_bot_log(self):
+    if self._bot_log_ready:
+        return
+    lg = logging.getLogger("bot")
+    lg.setLevel(logging.INFO)
+    lg.addHandler(GuiLogHandler(self))
+    try:
+        fh = RotatingFileHandler(os.path.join(self.out_dir(), "bot.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        lg.addHandler(fh)
+    except Exception:
+        pass
+    self._bot_log_ready = True
+
+def _bot_label(self, on):
+    self.bot_lbl.text = fa("وضعیت ربات: روشن" if on else "وضعیت ربات: خاموش")
+    self.bot_lbl.color = GRN if on else MUT
+
+def start_bot(self):
+    if self.bot_obj is not None:
+        return
+    if not self._need_vid():
+        return
+    self._attach_bot_log()
+    b = self.bot.Bot(self._bot_cfg())
+    self.bot_obj = b
+    self.cfg["bot_on"] = True
+    self._save()
+    self._bot_label(True)
+    def run():
+        rc = None
+        try:
+            rc = b.run()
+        except Exception as e:
+            self.log(f"خطا در ربات: {e}", "err")
+        def done():
+            if self.bot_obj is b:
+                self.bot_obj = None
+                self._bot_label(False)
+            if rc == 2:
+                self.log("توکن پذیرفته نشد؛ ربات متوقف شد.", "err")
+        self.ui(done)
+    threading.Thread(target=run, daemon=True).start()
+
+def stop_bot(self):
+    if self.bot_obj is not None:
+        self.bot_obj.stop()
+        self.bot_obj = None
+    self.cfg["bot_on"] = False
+    self._save()
+    self._bot_label(False)
+    self.log("ربات خاموش شد.")
+
+def _dry_text(self):
+    dry = bool(self.bot.jload(self.bot.CFG, {}).get("prices_dry_run", True))
+    self.dry_btn.set_text("اعمال prices.csv: " + ("فقط آزمایشی (چیزی تغییر نمیکند)" if dry else "واقعی (تغییرات ارسال میشود)"))
+
+def toggle_dry(self):
+    c = self.bot.jload(self.bot.CFG, {})
+    c["prices_dry_run"] = not c.get("prices_dry_run", True)
+    self.bot.jsave(self.bot.CFG, c)
+    self._dry_text()
+    self.log("prices.csv حالا " + ("آزمایشی است." if c["prices_dry_run"] else "واقعی است؛ تغییرات روی اسنپشاپ اعمال میشود."), "ok" if c["prices_dry_run"] else "err")
+
+def _win_text(self):
+    self.win_btn.set_text("اجرا با روشن شدن ویندوز: " + ("بله" if self.cfg.get("winstart") else "خیر"))
+
+def toggle_winstart(self):
+    on = not self.cfg.get("winstart")
+    if on and not getattr(sys, "frozen", False):
+        self.log("این گزینه فقط در نسخهی EXE کار میکند.", "err")
+        return
+    try:
+        self.bot.startup(on)
+    except Exception as e:
+        self.log(f"تنظیم اجرای خودکار ناموفق بود: {e}", "err")
+        return
+    self.cfg["winstart"] = on
+    self._save()
+    self._win_text()
+    self.log("اجرا با روشن شدن ویندوز " + ("فعال شد." if on else "غیرفعال شد."), "ok")
+
+def bot_export(self):
+    if not self._need_vid():
+        return
+    self._attach_bot_log()
+    self.go("log")
+    self._run(lambda: self.bot.Bot(self._bot_cfg()).export_products())
+
+def bot_report(self):
+    if not self._need_vid():
+        return
+    self._attach_bot_log()
+    self.go("log")
+    self._run(lambda: self.bot.Bot(self._bot_cfg()).report(force=True))
+
+def open_folder(self):
+    d = self.out_dir()
+    try:
+        if os.name == "nt":
+            os.startfile(d)
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", d])
+    except Exception as e:
+        self.log(f"پوشه: {d} ({e})", "info")
+
+def _minimize(self):
+    try:
+        Window.minimize()
+    except Exception:
+        pass
+
+def on_pause(self):
         return True
 
 
