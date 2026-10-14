@@ -20,113 +20,32 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Unify bot.py, logic.py, and main.py
-      shell: bash
+    - name: Fix imports and Windows header
       run: |
-        python - << 'EOF'
-        import pathlib, py_compile, textwrap
+        python -c "import pathlib; p = pathlib.Path('main.py'); m = p.read_text('utf-8'); h = '# -*- coding: utf-8 -*-\nimport csv, datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time\nfrom concurrent.futures import ThreadPoolExecutor\nfrom logging.handlers import RotatingFileHandler\nfrom typing import Any, Dict, List, Optional, Tuple, Union\nimport requests\n_HERE0 = getattr(sys, \"_MEIPASS\", os.path.dirname(os.path.abspath(__file__)))\nif sys.stdout is None: sys.stdout = open(os.devnull, \"w\")\nif sys.stderr is None: sys.stderr = open(os.devnull, \"w\")\nos.environ.setdefault(\"KIVY_NO_CONSOLELOG\", \"1\")\nif os.name == \"nt\":\n    if getattr(site, \"USER_BASE\", None) is None: site.USER_BASE = _HERE0\n    if getattr(site, \"USER_SITE\", None) is None: site.USER_SITE = _HERE0\n    _oj = ntpath.join\n    ntpath.join = os.path.join = lambda a, *q: _oj(a if a is not None else _HERE0, *[x for x in q if x is not None])\n    if hasattr(os, \"add_dll_directory\"):\n        for _d in (\"\", \"share\\\\sdl2\\\\bin\", \"share\\\\glew\\\\bin\", \"share\\\\angle\\\\bin\"):\n            _p = _oj(_HERE0, _d) if _d else _HERE0\n            if os.path.isdir(_p):\n                try: os.add_dll_directory(_p)\n                except Exception: pass\n'; i = m.find('from kivy.app import App'); m = (h + m[i:] if i != -1 else h + m).replace('from typing import Any, Dict, List\n', 'from typing import Any, Dict, List, Optional\n'); p.write_text(m, 'utf-8'); import py_compile; py_compile.compile('main.py', doraise=True); print('OK')"
 
-        # --- 1. Patch bot.py ---
-        b = pathlib.Path("bot.py").read_text(encoding="utf-8").replace("\r\n", "\n")
-        if "SNAPP_BOT_DIR" not in b:
-            b = b.replace(
-                'APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))',
-                'APP_DIR = os.environ.get("SNAPP_BOT_DIR") or (os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__)))', 1
-            )
-        if "import threading" not in b:
-            b = b.replace("import time\nfrom logging.handlers", "import threading\nimport time\nfrom logging.handlers", 1)
-        if "self.stop_ev" not in b:
-            b = b.replace(
-                "        self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0\n",
-                "        self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0\n        self.stop_ev = threading.Event()\n\n    def stop(self):\n        self.stop_ev.set()\n", 1
-            )
-            b = b.replace(
-                "            time.sleep(10)\n            self.reload_cfg()",
-                "            if self.stop_ev.wait(10):\n                log.info(\"Bot stopped.\")\n                return 0\n            self.reload_cfg()", 1
-            )
-            b = b.replace(
-                "        while True:\n            now = time.monotonic()",
-                "        while not self.stop_ev.is_set():\n            now = time.monotonic()", 1
-            )
-        if "--minimized" not in b:
-            b = b.replace(
-                '    cmd = (f\'cmd /c start "" /min "{sys.executable}"\' if FROZEN',
-                '    cmd = (f\'cmd /c start "" /min "{sys.executable}" --minimized\' if FROZEN', 1
-            )
-            b = b.replace(
-                '    ap.add_argument("--uninstall-startup", action="store_true")',
-                '    ap.add_argument("--uninstall-startup", action="store_true")\n    ap.add_argument("--minimized", action="store_true", help=argparse.SUPPRESS)', 1
-            )
-        pathlib.Path("bot.py").write_text(b, encoding="utf-8")
+    - name: Commit fixed main.py
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add main.py
+        git diff --staged --quiet || git commit -m "Fix Optional and logging imports in main.py"
+        git push || true
 
-        # --- 2. Patch main.py (Unconditional Header Injection with Optional & concurrent.futures) ---
-        m = pathlib.Path("main.py").read_text(encoding="utf-8").replace("\r\n", "\n")
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install kivy==2.3.0 kivy_deps.sdl2 kivy_deps.glew kivy_deps.angle requests urllib3 idna charset-normalizer certifi arabic-reshaper python-bidi==0.4.2 future pyinstaller
 
-        head_new = '''# -*- coding: utf-8 -*-
-        import csv, datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time
-        from concurrent.futures import ThreadPoolExecutor
-        from logging.handlers import RotatingFileHandler
-        from typing import Any, Dict, List, Optional, Tuple, Union
+    - name: Build EXE with PyInstaller
+      env:
+        KIVY_GL_BACKEND: angle_sdl2
+        KIVY_NO_CONSOLELOG: 1
+      run: |
+        python -c "import sys, os, PyInstaller.__main__, kivy_deps.sdl2, kivy_deps.glew, kivy_deps.angle; share = os.path.join(sys.prefix, 'share'); bins = [f'--add-binary={p};.' for p in (kivy_deps.sdl2.dep_bins + kivy_deps.glew.dep_bins + kivy_deps.angle.dep_bins) if os.path.isdir(p)]; PyInstaller.__main__.run(['--noconfirm', '--onefile', '--windowed', '--add-data=DejaVuSans.ttf;.', '--add-data=DejaVuSans-Bold.ttf;.', f'--add-data={share};share', *bins, '--hidden-import=logic', '--hidden-import=core', '--hidden-import=bot', '--hidden-import=kivy_deps.sdl2', '--hidden-import=kivy_deps.glew', '--hidden-import=kivy_deps.angle', 'main.py'])"
 
-        _HERE0 = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-        if sys.stdout is None:
-            sys.stdout = open(os.devnull, "w")
-        if sys.stderr is None:
-            sys.stderr = open(os.devnull, "w")
-        os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
-        if os.name == "nt":
-            if getattr(site, "USER_BASE", None) is None:
-                site.USER_BASE = _HERE0
-            if getattr(site, "USER_SITE", None) is None:
-                site.USER_SITE = _HERE0
-            _orig_join = ntpath.join
-            def _safe_join(a, *p):
-                return _orig_join(a if a is not None else _HERE0, *[x for x in p if x is not None])
-            ntpath.join = os.path.join = _safe_join
-            if hasattr(os, "add_dll_directory"):
-                for _d in ("", "share\\\\sdl2\\\\bin", "share\\\\glew\\\\bin", "share\\\\angle\\\\bin"):
-                    _p = _orig_join(_HERE0, _d) if _d else _HERE0
-                    if os.path.isdir(_p):
-                        try:
-                            os.add_dll_directory(_p)
-                        except Exception:
-                            pass
-        '''
-        kivy_idx = m.find("from kivy.app import App")
-        assert kivy_idx != -1, "Could not find Kivy import in main.py"
-        # Keep requests import if it was right before Kivy, otherwise inject it too
-        m = textwrap.dedent(head_new).lstrip() + "\nimport requests\n" + m[kivy_idx:]
-
-        # Guarantee Optional is imported if any other typing import exists in the body
-        m = m.replace("from typing import Any, Dict, List\n", "from typing import Any, Dict, List, Optional\n")
-
-        # Plain string replace for Persian hint_text (no regex escapes)
-        m = m.replace(
-            "return TextInput(hint_text=hint,",
-            "has_fa = any('\\u0600' <= ch <= '\\u06FF' for ch in str(hint))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign='right' if has_fa else 'left',",
-            1
-        )
-
-        gui_log_cls = '''import logging
-        from logging.handlers import RotatingFileHandler
-
-        class GuiLogHandler(logging.Handler):
-            """Shows the bot's log lines inside the app's report tab."""
-            def __init__(self, app):
-                super().__init__(logging.INFO)
-                self.app = app
-                self.setFormatter(logging.Formatter("%(message)s"))
-
-            def emit(self, r):
-                try:
-                    msg = self.format(r)
-                    kind = "err" if r.levelno >= logging.WARNING else ("ok" if "NEW_ORDER" in msg else "info")
-                    self.app.log(msg, kind)
-                except Exception:
-                    pass
-
-
-        class ProdCard(Bg):'''
-
-        if "class GuiLogHandler" not in m:
-            m = m.replace("class ProdCard(Bg):",
+    - name: Upload EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: SnappShop-Windows-App
+        path: dist/main.exe
