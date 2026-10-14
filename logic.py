@@ -1,499 +1,469 @@
 # -*- coding: utf-8 -*-
-import csv, datetime, json, ntpath, os, re, shutil, site, sys, threading, time
-
-HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-if getattr(site, "USER_BASE", None) is None:
-    site.USER_BASE = HERE
-if getattr(site, "USER_SITE", None) is None:
-    site.USER_SITE = HERE
-
-_orig_join = ntpath.join
-def _safe_join(a, *p):
-    return _orig_join(a if a is not None else HERE, *[x for x in p if x is not None])
-ntpath.join = os.path.join = _safe_join
-
-if hasattr(os, "add_dll_directory"):
-    for _d in ("", "share\\sdl2\\bin", "share\\glew\\bin", "share\\angle\\bin"):
-        _p = _orig_join(HERE, _d) if _d else HERE
-        if os.path.isdir(_p):
-            try:
-                os.add_dll_directory(_p)
-            except Exception:
-                pass
-
-# PyInstaller --windowed has no stdout/stderr; Kivy would crash writing to None
-if sys.stdout is None:
-    sys.stdout = open(os.devnull, "w")
-if sys.stderr is None:
-    sys.stderr = open(os.devnull, "w")
-os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
-
-from concurrent.futures import ThreadPoolExecutor
+"""Pure logic (no Kivy): field detection, order classification, Excel export, redaction."""
+import io
+import re
+import zipfile
 from typing import Any, Dict, List, Optional
+from xml.sax.saxutils import escape
 
-import requests
-from kivy.app import App
-from kivy.clock import Clock
-from kivy.core.clipboard import Clipboard
-from kivy.core.text import LabelBase
-from kivy.core.window import Window
-from kivy.graphics import Color, Line, RoundedRectangle
-from kivy.metrics import dp, sp
-from kivy.uix.behaviors import ButtonBehavior, ToggleButtonBehavior
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.checkbox import CheckBox
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.label import Label
-from kivy.uix.modalview import ModalView
-from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.textinput import TextInput
-from kivy.utils import platform
-
-import arabic_reshaper
-try:
-    from bidi.algorithm import get_display
-except ImportError:
-    from bidi import get_display
-
-from logic import (build_sales_workbook, event_line, first_array, flat, make_xlsx_multi, norm_order,
-                   norm_prod, plan_auto, plan_undercut, read_mins_csv, redact, write_mins_csv)
-
-# ---------------- theme ----------------
-BG = (0.045, 0.06, 0.095, 1)
-BAR = (0.075, 0.10, 0.155, 1)
-CARD = (0.095, 0.125, 0.19, 1)
-FIELD = (0.055, 0.075, 0.12, 1)
-CHIP = (0.14, 0.18, 0.27, 1)
-ACC = (0.22, 0.52, 0.98, 1)
-ACC2 = (0.18, 0.23, 0.34, 1)
-GRN = (0.24, 0.84, 0.52, 1)
-RED = (0.96, 0.38, 0.38, 1)
-AMB = (0.98, 0.74, 0.16, 1)
-TXT = (0.93, 0.95, 0.98, 1)
-MUT = (0.56, 0.62, 0.73, 1)
-
-LabelBase.register(name="fa",
-                   fn_regular=os.path.join(HERE, "DejaVuSans.ttf"),
-                   fn_bold=os.path.join(HERE, "DejaVuSans-Bold.ttf"))
-FONT = FONT_B = "fa"
-Window.clearcolor = BG
-Window.softinput_mode = "below_target"
+# ---------------- helpers ----------------
+def norm(s) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
-def fa(text) -> str:
-    if text is None or text == "":
-        return ""
-    return "\n".join(get_display(arabic_reshaper.reshape(l)) for l in str(text).split("\n"))
-
-
-def n(x) -> str:
-    return "—" if x is None else f"{int(round(x)):,}"
-
-
-def to_num_safe(v):
-    try:
-        return float(v) if v is not None else None
-    except Exception:
+def to_num(v) -> Optional[float]:
+    if isinstance(v, bool):
         return None
+    if isinstance(v, (int, float)):
+        return float(v) if v == v and abs(v) != float("inf") else None
+    if isinstance(v, str):
+        t = re.sub(r"[,\s\u066c\u060c]", "", v)
+        if not t:
+            return None
+        try:
+            return float(t)
+        except ValueError:
+            return None
+    return None
 
 
-# ---------------- API ----------------
-class SnappShopAutomationAPI:
-    BASE_URL = "https://apix.snappshop.ir/automation/v1"
-
-    def __init__(self, unique_id: str, bearer_token: str):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": unique_id.strip(),
-            "Authorization": f"Bearer {bearer_token.strip()}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
-
-    def _request(self, method: str, endpoint: str, **kw) -> Any:
-        r = self.session.request(method, f"{self.BASE_URL}/{endpoint.lstrip('/')}", timeout=25, **kw)
-        r.raise_for_status()
-        return r.json()
-
-    def get_first_vendor_id(self) -> Optional[str]:
-        v = self._request("GET", "vendors").get("data", [])
-        return v[0].get("id") if v else None
-
-    def get_all_products(self, vid: str) -> List[Dict[str, Any]]:
-        out, page = [], 1
-        while True:
-            res = self._request("GET", f"vendors/{vid}/products", params={"page": page})
-            d = res.get("data", [])
-            if not d:
-                break
-            out.extend(d)
-            if page >= res.get("meta", {}).get("pagination", {}).get("total_pages", 1):
-                break
-            page += 1
-        return out
-
-    def update_products(self, vid: str, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def flat(o, pre="", out=None, d=0):
+    if out is None:
         out = []
-        for i in range(0, len(products), 50):
-            res = self._request("PATCH", f"vendors/{vid}/products", json={"products": products[i:i + 50]})
-            out.extend(res.get("data", []))
-        return out
+    if isinstance(o, dict) and d < 3:
+        for k, v in o.items():
+            flat(v, f"{pre}.{k}" if pre else str(k), out, d + 1)
+    elif pre:
+        out.append((pre, o))
+    return out
 
-    def get_all_latest_events(self, vid: str) -> List[Dict[str, Any]]:
-        ev, cursor = [], None
-        while True:
-            res = self._request("GET", f"vendors/{vid}/orders/events", params={"cursor": cursor} if cursor else {})
-            b = res.get("data", [])
-            if not b:
+
+def find(o, names, fl=None):
+    if fl is None:
+        fl = flat(o)
+    for name in names:
+        best = None
+        for path, val in fl:
+            seg = path.split(".")
+            if norm(seg[-1]) != name or val is None or isinstance(val, (dict, list)):
+                continue
+            if best is None or len(seg) < best[2]:
+                best = (path, val, len(seg))
+        if best:
+            return {"path": best[0], "value": best[1]}
+    return None
+
+
+NAMEK = ["title", "name", "productname", "producttitle", "titlefa", "namefa"]
+SKUK = ["sku", "vendorsku", "sellersku", "productcode", "code", "id"]
+PRICEK = ["price", "sellingprice", "saleprice", "finalprice", "currentprice"]
+STOCKK = ["stock", "quantity", "inventory", "qty", "stockcount", "availablestock"]
+ACTK = ["active", "isactive", "enabled", "isenabled", "status", "state", "visible", "isvisible"]
+BBK = ["buybox", "isbuybox", "hasbuybox", "buyboxwinner", "isbuyboxwinner", "winbuybox", "isbuyboxowner", "iswinner"]
+RANKK = ["rank", "position", "buyboxrank", "sellerrank"]
+COMPK = ["buyboxprice", "lowestprice", "lowestcompetitorprice", "competitorprice", "bestprice", "firstprice",
+         "lowestsellerprice", "buyboxwinnerprice", "topprice", "minimumcompetitorprice"]
+INACT_RE = re.compile(r"inactive|deactiv|disabled?|draft|hidden|archiv|stopped|suspend|غیر\s*فعال|غیرفعال|متوقف|مخفی", re.I)
+BOOL_KEYS = {"active", "isactive", "enabled", "isenabled", "visible", "isvisible"}
+
+
+class Prod:
+    def __init__(self, raw, idx):
+        self.raw = raw
+        self.i = idx
+        self.sel = False
+        self.name = "(بدون نام)"
+        self.sku = ""
+        self.price = None
+        self.stock = None
+        self.comp = None
+        self.active = None
+        self.bb = None
+        self.inactive = self.oos = self.lose = False
+        self.det: Dict[str, Optional[str]] = {}
+
+    def calc(self):
+        self.inactive = self.active is False
+        self.oos = self.stock is not None and self.stock <= 0
+        lose = False
+        if self.bb is False:
+            lose = True
+        elif self.bb is not True and self.comp is not None and self.price is not None and self.price > self.comp:
+            lose = True
+        self.lose = lose
+
+
+def norm_prod(p, idx) -> Prod:
+    fl = flat(p)
+    g = lambda names: find(p, names, fl)
+    nm, sk, pr, st = g(NAMEK), g(SKUK), g(PRICEK), g(STOCKK)
+    ac, bb, rk, cp = g(ACTK), g(BBK), g(RANKK), g(COMPK)
+    if not cp:
+        for path, val in fl:
+            lp, ls = norm(path), norm(path.split(".")[-1])
+            if ("." in path and re.search(r"buybox|lowest|competitor|firstseller|topseller|bestoffer", lp)
+                    and re.fullmatch(r"price|sellingprice|amount|value|finalprice", ls)
+                    and val is not None and not isinstance(val, (dict, list))):
+                cp = {"path": path, "value": val}
                 break
-            ev.extend(b)
-            m = res.get("meta", {}).get("pagination", {})
-            if not m.get("has_more") or not m.get("next_cursor"):
-                break
-            cursor = m["next_cursor"]
-        return ev
+    o = Prod(p, idx)
+    if nm:
+        o.name = str(nm["value"])
+    if sk:
+        o.sku = str(sk["value"])
+    o.price = to_num(pr["value"]) if pr else None
+    o.stock = to_num(st["value"]) if st else None
+    o.comp = to_num(cp["value"]) if cp else None
+    if ac:
+        v, k = ac["value"], norm(ac["path"].split(".")[-1])
+        if isinstance(v, bool):
+            o.active = v
+        elif isinstance(v, str):
+            if v == "true":
+                o.active = True
+            elif v == "false":
+                o.active = False
+            elif k in ("status", "state"):
+                o.active = not INACT_RE.search(v)
+        elif isinstance(v, (int, float)) and k in BOOL_KEYS:
+            o.active = v != 0
+    if bb:
+        b = bb["value"]
+        if isinstance(b, bool):
+            o.bb = b
+        elif b == "true" or b == 1:
+            o.bb = True
+        elif b == "false" or b == 0:
+            o.bb = False
+    if o.bb is None and rk and to_num(rk["value"]) is not None:
+        o.bb = to_num(rk["value"]) == 1
+    o.calc()
+    o.det = {"نام": nm and nm["path"], "کد": sk and sk["path"], "قیمت": pr and pr["path"],
+             "موجودی": st and st["path"], "فعال/غیرفعال": ac and ac["path"],
+             "بای‌باکس": (bb and bb["path"]) or (rk and rk["path"]), "قیمت نفر اول": cp and cp["path"]}
+    return o
 
-    def get_order_details(self, vid: str, num) -> Any:
-        return self._request("GET", f"vendors/{vid}/orders/{num}")
 
-    def get_orders_history(self, vid: str, s=None, e=None) -> Any:
-        p = {}
-        if s: p["start_date"] = s
-        if e: p["end_date"] = e
-        return self._request("GET", f"vendors/{vid}/orders", params=p)
+# ---------------- orders ----------------
+ONUMK = ["ordernumber", "number", "orderid", "ordercode", "code", "id"]
+OSTK = ["status", "orderstatus", "statustitle", "statusname", "statuslabel", "state"]
+ODTK = ["createdat", "orderdate", "placedat", "createdon", "createddate", "ordereddate", "date"]
+OTOTK = ["total", "totalprice", "totalamount", "payable", "payableamount", "grandtotal", "amount", "finalprice"]
 
 
-# ---------------- widgets ----------------
-class Bg(BoxLayout):
-    def __init__(self, color=CARD, radius=0, border_color=None, **kw):
-        super().__init__(**kw)
-        self._bcol = border_color
-        with self.canvas.before:
-            Color(*color)
-            self._r = RoundedRectangle(radius=[dp(radius)])
-            if border_color:
-                Color(*border_color)
-                self._ln = Line(rounded_rectangle=(self.x, self.y, self.width, self.height, dp(radius)), width=1.1)
+def is_shipped(s: str) -> bool:
+    return bool(re.search(r"ship|sent|dispatch|handover|transit|post|ارسال|پست|در\s*راه|پیک", s, re.I)) and \
+        not re.search(r"نشده|not\s*(yet\s*)?(sent|shipped)|unshipped|unsent", s, re.I)
+
+
+def is_delivered(s: str) -> bool:
+    return bool(re.search(r"\bdelivered\b|received|\bcomplete(d)?\b|finished|تحویل\s*مشتری|تحویل\s*شد|تحویل\s*داده\s*شد|تکمیل|دریافت\s*شده", s, re.I)) and \
+        not re.search(r"undelivered|not\s*delivered|نشده", s, re.I)
+
+
+class Order:
+    pass
+
+
+def norm_order(o, idx) -> Order:
+    fl = flat(o)
+    g = lambda names: find(o, names, fl)
+    nu, st, dt, to = g(ONUMK), g(OSTK), g(ODTK), g(OTOTK)
+    r = Order()
+    r.raw, r.i = o, idx
+    r.num = str(nu["value"]) if nu else ""
+    r.status = str(st["value"]) if st else ""
+    r.date = str(dt["value"]) if dt else ""
+    r.total = to_num(to["value"]) if to else None
+    r.shipped, r.delivered = is_shipped(r.status), is_delivered(r.status)
+    r.snd = r.shipped and not r.delivered
+    return r
+
+
+def first_array(o):
+    pref = ["items", "products", "lines", "orderitems", "cartitems", "skus", "details"]
+    if not isinstance(o, dict):
+        return None
+    for name in pref:
+        for k, v in o.items():
+            if norm(k) == name and isinstance(v, list) and v and isinstance(v[0], dict):
+                return v
+    for v in o.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return v
+    return None
+
+
+def scalars(o, prefix="") -> Dict[str, Any]:
+    return {prefix + k: v for k, v in flat(o) if not isinstance(v, (dict, list))}
+
+
+SENS = re.compile(r"phone|mobile|\btel\b|email|national|postal|zip|latitude|longitude|\blat\b|\blng\b|address|plaque|unit", re.I)
+SENSOBJ = re.compile(r"customer|receiver|recipient|buyer|user|consignee", re.I)
+PRI = re.compile(r"number|order.?id|date|created|status|title|name|sku|qty|quantity|count|price|total|amount|fee|commission|discount", re.I)
+
+
+def sales_rows(orders: List[dict]):
+    rows = []
+    for o in orders:
+        base = scalars(o)
+        arr = first_array(o)
+        if arr:
+            for it in arr:
+                r = dict(base)
+                r.update(scalars(it, "item."))
+                rows.append(r)
+        else:
+            rows.append(base)
+    cols, seen = [], set()
+    for r in rows:
+        for k in r:
+            if k not in seen:
+                seen.add(k)
+                cols.append(k)
+    cols = [c for c in cols if PRI.search(c)] + [c for c in cols if not PRI.search(c)]
+    cols = [c for c in cols if not SENS.search(c)][:60]
+    return cols, rows
+
+
+# ---------------- xlsx ----------------
+_CTRL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _x(s) -> str:
+    return escape(_CTRL.sub("", str(s)), {'"': "&quot;"})
+
+
+def _col(i: int) -> str:
+    s, i = "", i + 1
+    while i > 0:
+        m = (i - 1) % 26
+        s = chr(65 + m) + s
+        i = (i - 1) // 26
+    return s
+
+
+def _sheet_xml(cols, rows) -> str:
+    NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    H = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    sd = [H, f'<worksheet xmlns="{NS}"><sheetViews><sheetView rightToLeft="1" workbookViewId="0">'
+             '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>']
+    for i, c in enumerate(cols):
+        sd.append(f'<col min="{i+1}" max="{i+1}" width="{min(40, max(12, len(str(c)) + 4))}" customWidth="1"/>')
+    sd.append('</cols><sheetData><row r="1">')
+    for i, c in enumerate(cols):
+        sd.append(f'<c r="{_col(i)}1" s="1" t="inlineStr"><is><t>{_x(c)}</t></is></c>')
+    sd.append("</row>")
+    for ri, r in enumerate(rows):
+        sd.append(f'<row r="{ri+2}">')
+        for ci, c in enumerate(cols):
+            v = r.get(c)
+            if v is None or v == "":
+                continue
+            ref = f"{_col(ci)}{ri+2}"
+            if isinstance(v, bool):
+                sd.append(f'<c r="{ref}" t="b"><v>{1 if v else 0}</v></c>')
+            elif isinstance(v, (int, float)):
+                sd.append(f'<c r="{ref}"><v>{v}</v></c>')
             else:
-                self._ln = None
-        self._rad = dp(radius)
-        self.bind(pos=self._u, size=self._u)
-
-    def _u(self, *_):
-        self._r.pos, self._r.size = self.pos, self.size
-        if self._ln:
-            self._ln.rounded_rectangle = (self.x, self.y, self.width, self.height, self._rad)
+                sd.append(f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{_x(v)}</t></is></c>')
+        sd.append("</row>")
+    sd.append("</sheetData></worksheet>")
+    return "".join(sd)
 
 
-class Tap(ButtonBehavior, BoxLayout):
-    pass
+def make_xlsx_multi(sheets) -> bytes:
+    """sheets: list of (name, cols, rows)."""
+    NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    H = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    n = len(sheets)
+    ct = "".join(f'<Override PartName="/xl/worksheets/sheet{i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for i in range(n))
+    sh = "".join(f'<sheet name="{_x(s[0])[:31]}" sheetId="{i+1}" r:id="rId{i+1}"/>' for i, s in enumerate(sheets))
+    rel = "".join(f'<Relationship Id="rId{i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i+1}.xml"/>' for i in range(n))
+    rel += f'<Relationship Id="rId{n+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    files = {
+        "[Content_Types].xml": H + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + ct + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
+        "_rels/.rels": H + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": H + f'<workbook xmlns="{NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{sh}</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": H + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rel + '</Relationships>',
+        "xl/styles.xml": H + f'<styleSheet xmlns="{NS}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
+    }
+    for i, (_name, cols, rows) in enumerate(sheets):
+        files[f"xl/worksheets/sheet{i+1}.xml"] = _sheet_xml(cols, rows)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return buf.getvalue()
 
 
-class TapBg(ButtonBehavior, Bg):
-    pass
+def make_xlsx(cols, rows, sheet="Sales") -> bytes:
+    return make_xlsx_multi([(sheet, cols, rows)])
 
 
-def lab(text, color=TXT, size=14, bold=False, halign="right"):
-    l = Label(text=fa(text), font_name=FONT_B if bold else FONT, font_size=sp(size),
-              color=color, halign=halign, valign="middle", size_hint_y=None)
-    l.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
-    l.bind(texture_size=lambda i, s: setattr(i, "height", max(s[1], dp(18)) + dp(4)))
-    return l
+# ---------------- sales summaries (accounting) ----------------
+ITSKUK = ["sku", "vendorsku", "sellersku", "productcode", "code", "id"]
+ITNAMEK = ["title", "name", "productname", "producttitle"]
+QTYK = ["quantity", "qty", "count"]
+UPK = ["price", "unitprice", "sellingprice", "finalprice", "unitamount", "amount"]
+FA_HEAD = {"ordernumber": "شماره سفارش", "orderid": "شماره سفارش", "number": "شماره سفارش", "status": "وضعیت",
+           "createdat": "تاریخ", "orderdate": "تاریخ", "date": "تاریخ", "total": "مبلغ کل", "totalprice": "مبلغ کل",
+           "sku": "کد کالا", "title": "نام", "name": "نام", "quantity": "تعداد", "qty": "تعداد", "price": "قیمت واحد",
+           "count": "تعداد"}
 
 
-def inp(hint, text="", **kw):
-    has_fa = bool(re.search("[\u0600-\u06FF]", str(hint)))
-    h_txt = fa(hint) if has_fa else str(hint)
-    return TextInput(hint_text=h_txt, text=str(text), multiline=False, font_name=FONT, font_size=sp(15),
-                     halign="right" if has_fa else "left",
-                     size_hint_y=None, height=dp(48), padding=[dp(14), dp(12), dp(14), dp(10)],
-                     background_normal="", background_active="", background_color=FIELD,
-                     foreground_color=TXT, hint_text_color=MUT, cursor_color=ACC,
-                     write_tab=False, **kw)
+def fa_header(col: str) -> str:
+    tail = norm(col.split(".")[-1])
+    base = FA_HEAD.get(tail)
+    if not base:
+        return col
+    return ("کالا: " + base) if col.startswith("item.") else base
 
 
-class RBtn(ButtonBehavior, Label):
-    def __init__(self, text, color=ACC, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(15), color=(1, 1, 1, 1),
-                         size_hint_y=None, height=dp(48), **kw)
-        self._c = color
-        with self.canvas.before:
-            self._col = Color(*color)
-            self._r = RoundedRectangle(radius=[dp(12)])
-        self.bind(pos=self._u, size=self._u)
-
-    def _u(self, *_):
-        self._r.pos, self._r.size = self.pos, self.size
-
-    def set_text(self, t):
-        self.text = fa(t)
-
-    def on_press(self):
-        self._col.rgba = tuple(c * 0.72 for c in self._c[:3]) + (1,)
-
-    def on_release(self):
-        self._col.rgba = self._c
-
-
-class Chip(ButtonBehavior, Label):
-    def __init__(self, text, key, active=False, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(12.5),
-                         color=(1, 1, 1, 1) if active else MUT, size_hint=(None, None), height=dp(36), **kw)
-        self.key = key
-        self.texture_update()
-        self.width = self.texture_size[0] + dp(26)
-        with self.canvas.before:
-            Color(*(ACC if active else CHIP))
-            self._r = RoundedRectangle(radius=[dp(18)])
-        self.bind(pos=self._u, size=self._u)
-
-    def _u(self, *_):
-        self._r.pos, self._r.size = self.pos, self.size
+def sales_summary(orders: List[dict]):
+    by_sku: Dict[str, dict] = {}
+    by_day: Dict[str, dict] = {}
+    for o in orders:
+        t = find(o, OTOTK)
+        total = to_num(t["value"]) if t else None
+        d = find(o, ODTK)
+        day = str(d["value"])[:10] if d else "؟"
+        nu = find(o, ONUMK)
+        num = str(nu["value"]) if nu else ""
+        rec = by_day.setdefault(day, {"تاریخ": day, "تعداد سفارش": 0, "جمع فروش": 0.0})
+        rec["تعداد سفارش"] += 1
+        rec["جمع فروش"] += total or 0
+        for it in first_array(o) or []:
+            sk, nm = find(it, ITSKUK), find(it, ITNAMEK)
+            q, p = find(it, QTYK), find(it, UPK)
+            key = str(sk["value"]) if sk else "؟"
+            qty = to_num(q["value"]) if q else 1
+            qty = 1 if qty is None else qty
+            price = to_num(p["value"]) if p else None
+            r = by_sku.setdefault(key, {"کد کالا": key, "نام": str(nm["value"]) if nm else "", "تعداد": 0,
+                                        "جمع فروش": 0.0, "_orders": set()})
+            r["تعداد"] += qty
+            r["جمع فروش"] += qty * price if price is not None else 0
+            r["_orders"].add(num)
+    sku_rows = []
+    for r in sorted(by_sku.values(), key=lambda x: -x["جمع فروش"]):
+        sku_rows.append({"کد کالا": r["کد کالا"], "نام": r["نام"], "تعداد": r["تعداد"],
+                         "جمع فروش": r["جمع فروش"], "تعداد سفارش": len(r["_orders"])})
+    day_rows = [by_day[k] for k in sorted(by_day)]
+    return sku_rows, day_rows
 
 
-def chip_row():
-    sv = ScrollView(size_hint_y=None, height=dp(42), do_scroll_y=False, bar_width=0)
-    row = BoxLayout(orientation="horizontal", size_hint_x=None, spacing=dp(8))
-    row.bind(minimum_width=row.setter("width"))
-    sv.add_widget(row)
-    return sv, row
+def build_sales_workbook(orders: List[dict]) -> bytes:
+    cols, rows = sales_rows(orders)
+    head = {c: fa_header(c) for c in cols}
+    drows = [{head[c]: r.get(c) for c in cols} for r in rows]
+    sku_rows, day_rows = sales_summary(orders)
+    return make_xlsx_multi([
+        ("ریز سفارشات", [head[c] for c in cols], drows),
+        ("خلاصه کالا", ["کد کالا", "نام", "تعداد", "جمع فروش", "تعداد سفارش"], sku_rows),
+        ("خلاصه روزانه", ["تاریخ", "تعداد سفارش", "جمع فروش"], day_rows),
+    ])
 
 
-def badge(text, kind):
-    bg, fg = {
-        "r": ((0.32, 0.11, 0.12, 1), RED),
-        "g": ((0.07, 0.24, 0.14, 1), GRN),
-        "o": ((0.30, 0.22, 0.07, 1), AMB),
-        "n": (CHIP, (0.68, 0.76, 0.92, 1)),
-    }[kind]
-    l = Label(text=fa(text), font_name=FONT_B, font_size=sp(11), color=fg)
-    l.texture_update()
-    b = Bg(color=bg, radius=8, size_hint=(None, None), size=(l.texture_size[0] + dp(16), dp(24)))
-    b.add_widget(l)
-    return b
+# ---------------- redaction ----------------
+def redact(o, hide=False):
+    if isinstance(o, list):
+        return [redact(x, hide) for x in o]
+    if isinstance(o, dict):
+        return {k: redact(v, hide or bool(SENSOBJ.search(k)) or bool(SENS.search(k))) for k, v in o.items()}
+    if hide and isinstance(o, str):
+        return "***"
+    if hide and isinstance(o, (int, float)) and not isinstance(o, bool):
+        return 0
+    return o
 
 
-def stat_box(title, val, col=TXT):
-    b = Bg(color=FIELD, radius=10, orientation="vertical", padding=[dp(8), dp(6)], spacing=dp(2))
-    b.add_widget(lab(val, col, 15, bold=True, halign="center"))
-    b.add_widget(lab(title, MUT, 11, halign="center"))
-    return b
+# ---------------- undercut plan ----------------
+def plan_undercut(products: List[Prod], delta: int, floor: int):
+    """Returns (rows, skipped). rows: dicts {o, np, why}."""
+    sel = [o for o in products if o.sel]
+    base = sel if sel else [o for o in products if o.lose]
+    rows, skipped = [], 0
+    for o in base:
+        if o.comp is None or o.price is None or not o.sku:
+            skipped += 1
+            continue
+        np_ = int(o.comp - delta)
+        why = ""
+        if np_ <= 0:
+            why = "قیمت نامعتبر"
+        elif floor and np_ < floor:
+            why = "زیر حداقل مجاز"
+        elif np_ >= o.price:
+            why = "قیمت شما از قبل پایین‌تر است"
+        rows.append({"o": o, "np": np_, "why": why})
+    return rows, skipped
 
 
-def vbox():
-    b = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
-    b.bind(minimum_height=b.setter("height"))
-    return b
+# ---------------- automatic repricing ----------------
+def plan_auto(products: List[Prod], delta: int, mins: Dict[str, float], max_drop_pct: float = 15.0,
+              require_min: bool = True):
+    """Safe automatic undercut. Returns (changes, skips).
+    changes: [{sku,name,old,new,comp}]; skips: {reason: [sku,...]}"""
+    changes, skips = [], {}
+    def skip(why, sku):
+        skips.setdefault(why, []).append(sku)
+    for o in products:
+        if not o.lose:
+            continue
+        if o.inactive or o.oos:
+            skip("غیرفعال/ناموجود", o.sku)
+            continue
+        if o.comp is None or o.price is None or not o.sku:
+            skip("قیمت نفر اول نامشخص", o.sku)
+            continue
+        np_ = int(o.comp - delta)
+        if np_ <= 0:
+            skip("قیمت نامعتبر", o.sku)
+            continue
+        if np_ >= o.price:
+            skip("قیمت شما از قبل پایین‌تر است", o.sku)
+            continue
+        floor = mins.get(o.sku)
+        if floor is None and require_min:
+            skip("بدون حداقل قیمت", o.sku)
+            continue
+        if floor is not None and np_ < floor:
+            skip("زیر حداقل قیمت", o.sku)
+            continue
+        if max_drop_pct and (o.price - np_) / o.price * 100 > max_drop_pct:
+            skip("افت قیمت بیش از حد مجاز", o.sku)
+            continue
+        changes.append({"sku": o.sku, "name": o.name, "old": int(o.price), "new": np_, "comp": int(o.comp)})
+    return changes, skips
 
 
-def card(title, *widgets):
-    c = Bg(color=CARD, radius=14, border_color=(0.16, 0.21, 0.31, 1),
-           orientation="vertical", size_hint_y=None, padding=dp(14), spacing=dp(10))
-    c.bind(minimum_height=c.setter("height"))
-    if title:
-        c.add_widget(lab(title, ACC, size=15, bold=True))
-    for w in widgets:
-        c.add_widget(w)
-    return c
+def read_mins_csv(path: str) -> Dict[str, float]:
+    import csv
+    out: Dict[str, float] = {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return out
+    head = [norm(h) for h in rows[0]]
+    si = next((i for i, h in enumerate(head) if h in ("sku", "code", "id")), 0)
+    mi = next((i for i, h in enumerate(head) if "min" in h), None)
+    if mi is None:
+        mi = 1 if len(head) > 1 else 0
+    for r in rows[1:]:
+        if len(r) <= max(si, mi):
+            continue
+        v = to_num(r[mi])
+        if r[si].strip() and v is not None and v > 0:
+            out[r[si].strip()] = v
+    return out
 
 
-def page(*widgets):
-    sv = ScrollView(do_scroll_x=False)
-    box = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(12), size_hint_y=None)
-    box.bind(minimum_height=box.setter("height"))
-    for w in widgets:
-        box.add_widget(w)
-    sv.add_widget(box)
-    return sv
-
-
-class LogRow(BoxLayout):
-    def __init__(self, ts, text, kind, **kw):
-        super().__init__(orientation="horizontal", size_hint_y=None, spacing=dp(8), **kw)
-        col = {"ok": GRN, "err": RED}.get(kind, TXT)
-        rtl = bool(re.search("[\u0600-\u06FF]", str(text)))
-        t = Label(text=ts, font_name=FONT, font_size=sp(11), color=MUT, size_hint=(None, None),
-                  size=(dp(54), dp(18)), halign="left", valign="top")
-        t.bind(size=lambda i, s: setattr(i, "text_size", s))
-        m = Label(text=fa(str(text)[:6000]), font_name=FONT, font_size=sp(13), color=col,
-                  halign="right" if rtl else "left", valign="top", size_hint_y=None)
-        m.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
-        m.bind(texture_size=lambda i, s: setattr(i, "height", s[1]))
-        m.bind(height=lambda i, h: setattr(self, "height", h + dp(6)))
-        self.add_widget(t)
-        self.add_widget(m)
-
-
-class NavBtn(ToggleButtonBehavior, Label):
-    def __init__(self, text, name, app, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(13), color=MUT,
-                         group="nav", allow_no_selection=False, **kw)
-        self.name, self.app = name, app
-
-    def on_state(self, _w, st):
-        self.color = ACC if st == "down" else MUT
-        if st == "down":
-            self.app.sm.current = self.name
-
-
-class StatusBar(ButtonBehavior, Label):
-    pass
-
-
-class ProdCard(Bg):
-    def __init__(self, o, app, **kw):
-        bcol = (0.18, 0.45, 0.30, 1) if o.bb is True else ((0.45, 0.22, 0.22, 1) if o.lose else (0.16, 0.20, 0.30, 1))
-        super().__init__(color=CARD, radius=12, border_color=bcol, orientation="vertical",
-                         size_hint_y=None, padding=dp(12), spacing=dp(6), **kw)
-        self.o, self.app = o, app
-        self.bind(minimum_height=self.setter("height"))
-        top = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(10))
-        top.bind(minimum_height=top.setter("height"))
-        cb = CheckBox(size_hint=(None, None), size=(dp(34), dp(34)), active=o.sel)
-        cb.bind(active=self._sel)
-        tap = Tap(orientation="vertical", size_hint_y=None, spacing=dp(2))
-        tap.bind(minimum_height=tap.setter("height"))
-        title_txt = o.name + (f"  [{o.variation}]" if o.variation else "")
-        tap.add_widget(lab(title_txt, bold=True, size=14))
-        id_line = f"ID: {o.id}" + (f"  |  SKU: {o.real_sku}" if o.real_sku else "") + (f"  |  کد: {o.product_number}" if o.product_number else "")
-        tap.add_widget(lab(id_line, MUT, 11))
-        tap.bind(on_release=lambda *_: app.edit_product(o))
-        top.add_widget(cb)
-        top.add_widget(tap)
-        self.add_widget(top)
-
-        price_line = f"قیمت پایه: {n(o.price)}"
-        if o.has_sp:
-            price_line += f"   |   تخفیف‌دار: {n(o.sp)}"
-        price_line += f"   |   موجودی: {n(o.stock)}"
-        self.add_widget(lab(price_line, AMB if o.has_sp else TXT, size=13))
-
-        bs = []
-        if o.inactive:
-            bs.append(badge("غیرفعال", "r"))
-        if o.oos:
-            bs.append(badge("ناموجود", "o"))
-        if o.has_sp:
-            bs.append(badge("تخفیف فعال", "o"))
-        if o.bb is True:
-            bs.append(badge(f"برنده بای‌باکس ({n(o.comp)})" if o.comp else "برنده بای‌باکس", "g"))
-        elif o.lose:
-            diff = int((o.eff_price or 0) - (o.comp or 0)) if (o.eff_price and o.comp) else 0
-            diff_txt = f" (+{n(diff)})" if diff > 0 else ""
-            bs.append(badge(f"نفر اول: {n(o.comp)}{diff_txt}" if o.comp is not None else "بدون بای‌باکس", "r"))
-        min_v = app.mins.get(o.sku) or app.mins.get(o.id)
-        if min_v:
-            bs.append(badge(f"کف ربات: {n(min_v)}", "n"))
-        if bs:
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(26), spacing=dp(6))
-            row.add_widget(BoxLayout())
-            for b in bs:
-                row.add_widget(b)
-            self.add_widget(row)
-
-    def _sel(self, _i, val):
-        self.o.sel = val
-        self.app.upd_sel()
-
-
-FILT = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"), ("oos", "ناموجود"),
-        ("bb", "بای‌باکس دارم"), ("lose", "بای‌باکس ندارم")]
-
-
-# ---------------- app ----------------
-class SnappShopApp(App):
-    title = "SnappShop Automation"
-
-    def build(self):
-        self.api = None
-        self.vendor_id = ""
-        self.bot_ev = threading.Event()
-        self.bot_on = False
-        self.log_lock = threading.Lock()
-        self.P: List[Any] = []
-        self.PF, self.Q, self.shown = "all", "", 100
-        self.O: List[Any] = []
-        self.OF = "all"
-        self.cfg_path = os.path.join(self.user_data_dir, "cfg.json")
-        self.data_dir = self.user_data_dir
-        self.mins_path = os.path.join(self.data_dir, "mins.json")
-        self.hist_path = os.path.join(self.data_dir, "reprice_history.csv")
-        self.flog_path = os.path.join(self.data_dir, "automation.log")
-        try:
-            with open(self.cfg_path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception:
-            cfg = {}
-        self.auto_cfg = {"bot": False, "interval": 10, "delta": 5000, "maxdrop": 15, "reqmin": True, "winstart": False}
-        self.auto_cfg.update(cfg.get("auto", {}))
-        try:
-            with open(self.mins_path, encoding="utf-8") as f:
-                self.mins = {k: float(v) for k, v in json.load(f).items()}
-        except Exception:
-            self.mins = {}
-
-        root = BoxLayout(orientation="vertical")
-        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(54))
-        header.add_widget(lab("پنل مدیریت و اتوماسیون اسنپ‌شاپ", size=17, bold=True, halign="center"))
-        root.add_widget(header)
-
-        self.status = StatusBar(text="", font_name=FONT, font_size=sp(12), color=MUT,
-                                size_hint_y=None, height=dp(28), halign="center", shorten=True, shorten_from="right")
-        self.status.bind(size=lambda i, s: setattr(i, "text_size", (s[0] - dp(16), None)))
-        self.status.bind(on_release=lambda *_: self.go("log"))
-        root.add_widget(self.status)
-
-        self.sm = ScreenManager(transition=NoTransition())
-
-        # --- connection
-        self.ent_ua = inp("User-Agent", cfg.get("ua", ""))
-        self.ent_token = inp("Bearer Token", cfg.get("token", ""), password=True)
-        self.ent_vid = inp("Vendor ID", cfg.get("vid", ""))
-        b = RBtn("تست اتصال و دریافت شناسه فروشگاه")
-        b.bind(on_release=lambda *_: self.test_connection())
-        b2 = RBtn("دریافت نمونه داده‌ها (JSON)", ACC2)
-        b2.bind(on_release=lambda *_: self.dump_samples())
-        self._add("conn", page(
-            card("احراز هویت API",
-                 lab("کد یکتا (User-Agent)", MUT, 12), self.ent_ua,
-                 lab("توکن (Bearer Token)", MUT, 12), self.ent_token,
-                 lab("شناسه فروشگاه (Vendor ID)", MUT, 12), self.ent_vid, b),
-            card("عیب‌یابی و استخراج ساختار",
-                 lab("یک نمونه از کالا، سفارش و رویداد را دریافت و در کلیپ‌بورد کپی می‌کند.", MUT, 11), b2)))
-
-        # --- products
-        self.pstats = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(58), spacing=dp(8))
-        self.pcount = lab("", MUT, 12, halign="center")
-        self.pchips_sv, self.pchips = chip_row()
-        self.pdet = lab("", MUT, 11)
-        self.ent_q = inp("جستجو در نام، رنگ یا کد کالا", "")
-        self.ent_q.bind(text=self._on_q)
-        p1 = RBtn("دریافت و بروزرسانی لیست کالاها")
-        p1.bind(on_release=lambda *_: self.get_products())
-        p2 = RBtn("انتخاب همه", ACC2)
-        p2.bind(on_release=lambda *_: self.sel_all(True))
-        p3 = RBtn("لغو انتخاب", ACC2)
-        p3.bind(on_release=lambda *_: self.sel_all(False))
-        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
-        brow.add_widget(p2)
-        brow.add_widget(p3)
-        p4 = RBtn("ویرایش گروهی کالاهای انتخاب‌شده", (0.20, 0.45, 0.85, 1))
-        p4.bind(on_release=lambda *_: self.bulk_edit())
-        self.ent_delta = inp("5000", "5000", input_filter="int")
-        self.ent_floor = inp("0", "", input_filter="int")
-        u1 = RBtn("پیش‌نمایش و اعمال قیمت زیر نفر اول")
-        u1.bind(on_release=lambda *_: self.undercut())
-        self.ent_sku = inp("z681wQ")
-        self.ent_stock = inp("10", "10", input_filter="int")
-        self.ent_price = inp("150000", "150000", input_filter="int")
-        m1 = RBtn("به‌روزرسانی سریع کالا")
-        m1.bind(on_release=lambda *_: self.update_product())
-        self.pl = vbox()
-        self.pl.spacing = dp(10)
-        self._add("prod", page(
-            card("مدیریت کالاها", p1, self.pstats, brow, p4, self.pcount, self.ent_q, self.pchips_sv, self.pdet),
-            card("قیمت‌گذاری رقابتی (اولویت با قیمت تخفیف‌دار)",
-                 lab("مبلغ کاهش نسبت به قیمت بای‌باکس (ریال)", MUT, 12), self.ent_delta,
-                 lab("کف قیمت مجاز (اختیاری)", MUT, 12), self.ent_floor, u1,
-                 lab("اگر کالا تخفیف داشته باشد یا قیمت جدید زیر قیمت پایه باشد، به‌عنوان قیمت تخفیف‌دار (special
+def write_mins_csv(path: str, products: List[Prod], mins: Dict[str, float]):
+    import csv
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["sku", "name", "price", "competitor_price", "min_price"])
+        for o in products:
+            w.writerow([o.sku, o.name, "" if o.price is None else int(o.price),
+                        "" if o.comp is None else int(o.comp), "" if o.sku not in mins else int(mins[o.sku])])

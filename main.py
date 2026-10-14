@@ -1,33 +1,20 @@
 # -*- coding: utf-8 -*-
-import csv, json, ntpath, os, shutil, site, sys, threading, time
-
+import csv, datetime, json, ntpath, os, re, shutil, site, sys, threading, time
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-if getattr(site, "USER_BASE", None) is None:
-    site.USER_BASE = HERE
-if getattr(site, "USER_SITE", None) is None:
-    site.USER_SITE = HERE
-
+if getattr(site, "USER_BASE", None) is None: site.USER_BASE = HERE
+if getattr(site, "USER_SITE", None) is None: site.USER_SITE = HERE
 _orig_join = ntpath.join
-def _safe_join(a, *p):
-    return _orig_join(a if a is not None else HERE, *[x for x in p if x is not None])
+def _safe_join(a, *p): return _orig_join(a if a is not None else HERE, *[x for x in p if x is not None])
 ntpath.join = os.path.join = _safe_join
-
 if hasattr(os, "add_dll_directory"):
     for _d in ("", "share\\sdl2\\bin", "share\\glew\\bin", "share\\angle\\bin"):
         _p = _orig_join(HERE, _d) if _d else HERE
         if os.path.isdir(_p):
-            try:
-                os.add_dll_directory(_p)
-            except Exception:
-                pass
-
-# PyInstaller --windowed has no stdout/stderr; Kivy would crash writing to None
-if sys.stdout is None:
-    sys.stdout = open(os.devnull, "w")
-if sys.stderr is None:
-    sys.stderr = open(os.devnull, "w")
+            try: os.add_dll_directory(_p)
+            except Exception: pass
+if sys.stdout is None: sys.stdout = open(os.devnull, "w")
+if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
-
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -37,7 +24,7 @@ from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
-from kivy.graphics import Color, Line, RoundedRectangle
+from kivy.graphics import Color, RoundedRectangle
 from kivy.metrics import dp, sp
 from kivy.uix.behaviors import ButtonBehavior, ToggleButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
@@ -56,23 +43,24 @@ try:
 except ImportError:
     from bidi import get_display
 
-from logic import (build_sales_workbook, event_line, first_array, flat, make_xlsx_multi, norm_order,
-                   norm_prod, plan_auto, plan_undercut, read_mins_csv, redact, write_mins_csv)
+from logic import (build_sales_workbook, first_array, flat, make_xlsx_multi, norm_order, norm_prod,
+                   plan_auto, plan_undercut, read_mins_csv, redact, write_mins_csv)
 
 # ---------------- theme ----------------
-BG = (0.045, 0.06, 0.095, 1)
-BAR = (0.075, 0.10, 0.155, 1)
-CARD = (0.095, 0.125, 0.19, 1)
-FIELD = (0.055, 0.075, 0.12, 1)
-CHIP = (0.14, 0.18, 0.27, 1)
-ACC = (0.22, 0.52, 0.98, 1)
-ACC2 = (0.18, 0.23, 0.34, 1)
-GRN = (0.24, 0.84, 0.52, 1)
-RED = (0.96, 0.38, 0.38, 1)
-AMB = (0.98, 0.74, 0.16, 1)
-TXT = (0.93, 0.95, 0.98, 1)
-MUT = (0.56, 0.62, 0.73, 1)
+BG = (0.055, 0.07, 0.11, 1)
+BAR = (0.09, 0.11, 0.17, 1)
+CARD = (0.105, 0.13, 0.20, 1)
+FIELD = (0.06, 0.08, 0.13, 1)
+CHIP = (0.15, 0.19, 0.29, 1)
+ACC = (0.23, 0.51, 0.96, 1)
+ACC2 = (0.20, 0.25, 0.36, 1)
+GRN = (0.30, 0.85, 0.50, 1)
+RED = (0.97, 0.40, 0.40, 1)
+AMB = (0.98, 0.75, 0.14, 1)
+TXT = (0.90, 0.92, 0.96, 1)
+MUT = (0.55, 0.60, 0.70, 1)
 
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 LabelBase.register(name="fa",
                    fn_regular=os.path.join(HERE, "DejaVuSans.ttf"),
                    fn_bold=os.path.join(HERE, "DejaVuSans-Bold.ttf"))
@@ -89,13 +77,6 @@ def n(x) -> str:
     return "—" if x is None else f"{int(round(x)):,}"
 
 
-def to_num_safe(v):
-    try:
-        return float(v) if v is not None else None
-    except Exception:
-        return None
-
-
 # ---------------- API ----------------
 class SnappShopAutomationAPI:
     BASE_URL = "https://apix.snappshop.ir/automation/v1"
@@ -110,7 +91,7 @@ class SnappShopAutomationAPI:
         })
 
     def _request(self, method: str, endpoint: str, **kw) -> Any:
-        r = self.session.request(method, f"{self.BASE_URL}/{endpoint.lstrip('/')}", timeout=25, **kw)
+        r = self.session.request(method, f"{self.BASE_URL}/{endpoint.lstrip('/')}", timeout=20, **kw)
         r.raise_for_status()
         return r.json()
 
@@ -164,24 +145,15 @@ class SnappShopAutomationAPI:
 
 # ---------------- widgets ----------------
 class Bg(BoxLayout):
-    def __init__(self, color=CARD, radius=0, border_color=None, **kw):
+    def __init__(self, color=CARD, radius=0, **kw):
         super().__init__(**kw)
-        self._bcol = border_color
         with self.canvas.before:
             Color(*color)
             self._r = RoundedRectangle(radius=[dp(radius)])
-            if border_color:
-                Color(*border_color)
-                self._ln = Line(rounded_rectangle=(self.x, self.y, self.width, self.height, dp(radius)), width=1.1)
-            else:
-                self._ln = None
-        self._rad = dp(radius)
         self.bind(pos=self._u, size=self._u)
 
     def _u(self, *_):
         self._r.pos, self._r.size = self.pos, self.size
-        if self._ln:
-            self._ln.rounded_rectangle = (self.x, self.y, self.width, self.height, self._rad)
 
 
 class Tap(ButtonBehavior, BoxLayout):
@@ -201,8 +173,9 @@ def lab(text, color=TXT, size=14, bold=False, halign="right"):
 
 
 def inp(hint, text="", **kw):
-    return TextInput(hint_text=hint, text=text, multiline=False, font_name=FONT, font_size=sp(15),
-                     size_hint_y=None, height=dp(48), padding=[dp(14), dp(12), dp(14), dp(10)],
+    has_fa = bool(re.search("[\u0600-\u06FF]", str(hint)))
+    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign="right" if has_fa else "left", text=text, multiline=False, font_name=FONT, font_size=sp(16),
+                     size_hint_y=None, height=dp(50), padding=[dp(14), dp(14), dp(14), dp(10)],
                      background_normal="", background_active="", background_color=FIELD,
                      foreground_color=TXT, hint_text_color=MUT, cursor_color=ACC,
                      write_tab=False, **kw)
@@ -210,8 +183,8 @@ def inp(hint, text="", **kw):
 
 class RBtn(ButtonBehavior, Label):
     def __init__(self, text, color=ACC, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(15), color=(1, 1, 1, 1),
-                         size_hint_y=None, height=dp(48), **kw)
+        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(16), color=(1, 1, 1, 1),
+                         size_hint_y=None, height=dp(50), **kw)
         self._c = color
         with self.canvas.before:
             self._col = Color(*color)
@@ -225,7 +198,7 @@ class RBtn(ButtonBehavior, Label):
         self.text = fa(t)
 
     def on_press(self):
-        self._col.rgba = tuple(c * 0.72 for c in self._c[:3]) + (1,)
+        self._col.rgba = tuple(c * 0.7 for c in self._c[:3]) + (1,)
 
     def on_release(self):
         self._col.rgba = self._c
@@ -233,11 +206,11 @@ class RBtn(ButtonBehavior, Label):
 
 class Chip(ButtonBehavior, Label):
     def __init__(self, text, key, active=False, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(12.5),
+        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(13),
                          color=(1, 1, 1, 1) if active else MUT, size_hint=(None, None), height=dp(36), **kw)
         self.key = key
         self.texture_update()
-        self.width = self.texture_size[0] + dp(26)
+        self.width = self.texture_size[0] + dp(28)
         with self.canvas.before:
             Color(*(ACC if active else CHIP))
             self._r = RoundedRectangle(radius=[dp(18)])
@@ -248,7 +221,7 @@ class Chip(ButtonBehavior, Label):
 
 
 def chip_row():
-    sv = ScrollView(size_hint_y=None, height=dp(42), do_scroll_y=False, bar_width=0)
+    sv = ScrollView(size_hint_y=None, height=dp(44), do_scroll_y=False, bar_width=0)
     row = BoxLayout(orientation="horizontal", size_hint_x=None, spacing=dp(8))
     row.bind(minimum_width=row.setter("width"))
     sv.add_widget(row)
@@ -256,23 +229,12 @@ def chip_row():
 
 
 def badge(text, kind):
-    bg, fg = {
-        "r": ((0.32, 0.11, 0.12, 1), RED),
-        "g": ((0.07, 0.24, 0.14, 1), GRN),
-        "o": ((0.30, 0.22, 0.07, 1), AMB),
-        "n": (CHIP, (0.68, 0.76, 0.92, 1)),
-    }[kind]
+    bg, fg = {"r": ((0.30, 0.11, 0.11, 1), RED), "g": ((0.07, 0.21, 0.12, 1), GRN),
+              "o": ((0.29, 0.21, 0.07, 1), AMB), "n": (CHIP, (0.62, 0.71, 0.88, 1))}[kind]
     l = Label(text=fa(text), font_name=FONT_B, font_size=sp(11), color=fg)
     l.texture_update()
-    b = Bg(color=bg, radius=8, size_hint=(None, None), size=(l.texture_size[0] + dp(16), dp(24)))
+    b = Bg(color=bg, radius=8, size_hint=(None, None), size=(l.texture_size[0] + dp(16), dp(22)))
     b.add_widget(l)
-    return b
-
-
-def stat_box(title, val, col=TXT):
-    b = Bg(color=FIELD, radius=10, orientation="vertical", padding=[dp(8), dp(6)], spacing=dp(2))
-    b.add_widget(lab(val, col, 15, bold=True, halign="center"))
-    b.add_widget(lab(title, MUT, 11, halign="center"))
     return b
 
 
@@ -283,11 +245,10 @@ def vbox():
 
 
 def card(title, *widgets):
-    c = Bg(color=CARD, radius=14, border_color=(0.16, 0.21, 0.31, 1),
-           orientation="vertical", size_hint_y=None, padding=dp(14), spacing=dp(10))
+    c = Bg(color=CARD, radius=14, orientation="vertical", size_hint_y=None, padding=dp(14), spacing=dp(10))
     c.bind(minimum_height=c.setter("height"))
     if title:
-        c.add_widget(lab(title, ACC, size=15, bold=True))
+        c.add_widget(lab(title, size=15, bold=True))
     for w in widgets:
         c.add_widget(w)
     return c
@@ -323,7 +284,7 @@ class LogRow(BoxLayout):
 
 class NavBtn(ToggleButtonBehavior, Label):
     def __init__(self, text, name, app, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(13), color=MUT,
+        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(12), color=MUT,
                          group="nav", allow_no_selection=False, **kw)
         self.name, self.app = name, app
 
@@ -339,48 +300,31 @@ class StatusBar(ButtonBehavior, Label):
 
 class ProdCard(Bg):
     def __init__(self, o, app, **kw):
-        bcol = (0.18, 0.45, 0.30, 1) if o.bb is True else ((0.45, 0.22, 0.22, 1) if o.lose else (0.16, 0.20, 0.30, 1))
-        super().__init__(color=CARD, radius=12, border_color=bcol, orientation="vertical",
-                         size_hint_y=None, padding=dp(12), spacing=dp(6), **kw)
+        super().__init__(color=CARD, radius=12, orientation="vertical", size_hint_y=None,
+                         padding=dp(10), spacing=dp(6), **kw)
         self.o, self.app = o, app
         self.bind(minimum_height=self.setter("height"))
         top = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(10))
         top.bind(minimum_height=top.setter("height"))
         cb = CheckBox(size_hint=(None, None), size=(dp(34), dp(34)), active=o.sel)
         cb.bind(active=self._sel)
-        tap = Tap(orientation="vertical", size_hint_y=None, spacing=dp(2))
+        tap = Tap(orientation="vertical", size_hint_y=None)
         tap.bind(minimum_height=tap.setter("height"))
-        title_txt = o.name + (f"  [{o.variation}]" if o.variation else "")
-        tap.add_widget(lab(title_txt, bold=True, size=14))
-        id_line = f"ID: {o.id}" + (f"  |  SKU: {o.real_sku}" if o.real_sku else "") + (f"  |  کد: {o.product_number}" if o.product_number else "")
-        tap.add_widget(lab(id_line, MUT, 11))
+        tap.add_widget(lab(o.name, bold=True, size=14))
+        tap.add_widget(lab(o.sku, MUT, 11))
         tap.bind(on_release=lambda *_: app.edit_product(o))
         top.add_widget(cb)
         top.add_widget(tap)
         self.add_widget(top)
-
-        price_line = f"قیمت: {n(o.price)}"
-        if o.sp:
-            price_line += f"   |   با تخفیف: {n(o.sp)}"
-        price_line += f"   |   موجودی: {n(o.stock)}"
-        self.add_widget(lab(price_line, size=13))
-
+        self.add_widget(lab(f"قیمت: {n(o.price)}      موجودی: {n(o.stock)}", size=13))
         bs = []
-        if o.inactive:
-            bs.append(badge("غیرفعال", "r"))
-        if o.oos:
-            bs.append(badge("ناموجود", "o"))
-        if o.bb is True:
-            bs.append(badge(f"برنده بای‌باکس ({n(o.comp)})" if o.comp else "برنده بای‌باکس", "g"))
-        elif o.lose:
-            diff = int((o.eff_price or 0) - (o.comp or 0)) if (o.eff_price and o.comp) else 0
-            diff_txt = f" (+{n(diff)})" if diff > 0 else ""
-            bs.append(badge(f"نفر اول: {n(o.comp)}{diff_txt}" if o.comp is not None else "بدون بای‌باکس", "r"))
-        min_v = app.mins.get(o.sku) or app.mins.get(o.id)
-        if min_v:
-            bs.append(badge(f"کف ربات: {n(min_v)}", "n"))
+        if o.inactive: bs.append(badge("غیرفعال", "r"))
+        if o.oos: bs.append(badge("ناموجود", "o"))
+        if o.bb is True: bs.append(badge("بای‌باکس", "g"))
+        if o.lose: bs.append(badge(f"نفر اول: {n(o.comp)}" if o.comp is not None else "بدون بای‌باکس", "n"))
+        if app.mins.get(o.sku): bs.append(badge(f"حداقل ربات: {n(app.mins[o.sku])}", "n"))
         if bs:
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(26), spacing=dp(6))
+            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(24), spacing=dp(6))
             row.add_widget(BoxLayout())
             for b in bs:
                 row.add_widget(b)
@@ -397,7 +341,7 @@ FILT = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"
 
 # ---------------- app ----------------
 class SnappShopApp(App):
-    title = "SnappShop Automation"
+    title = "SnappShop"
 
     def build(self):
         self.api = None
@@ -415,21 +359,21 @@ class SnappShopApp(App):
         self.hist_path = os.path.join(self.data_dir, "reprice_history.csv")
         self.flog_path = os.path.join(self.data_dir, "automation.log")
         try:
-            with open(self.cfg_path, encoding="utf-8") as f:
+            with open(self.cfg_path) as f:
                 cfg = json.load(f)
         except Exception:
             cfg = {}
         self.auto_cfg = {"bot": False, "interval": 10, "delta": 5000, "maxdrop": 15, "reqmin": True, "winstart": False}
         self.auto_cfg.update(cfg.get("auto", {}))
         try:
-            with open(self.mins_path, encoding="utf-8") as f:
+            with open(self.mins_path) as f:
                 self.mins = {k: float(v) for k, v in json.load(f).items()}
         except Exception:
             self.mins = {}
 
         root = BoxLayout(orientation="vertical")
-        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(54))
-        header.add_widget(lab("پنل مدیریت و اتوماسیون اسنپ‌شاپ", size=17, bold=True, halign="center"))
+        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(56))
+        header.add_widget(lab("پنل اسنپ‌شاپ", size=18, bold=True, halign="center"))
         root.add_widget(header)
 
         self.status = StatusBar(text="", font_name=FONT, font_size=sp(12), color=MUT,
@@ -446,311 +390,118 @@ class SnappShopApp(App):
         self.ent_vid = inp("Vendor ID", cfg.get("vid", ""))
         b = RBtn("تست اتصال و دریافت شناسه فروشگاه")
         b.bind(on_release=lambda *_: self.test_connection())
-        b2 = RBtn("دریافت نمونه داده‌ها (JSON)", ACC2)
+        b2 = RBtn("دریافت نمونه داده‌ها", ACC2)
         b2.bind(on_release=lambda *_: self.dump_samples())
         self._add("conn", page(
-            card("احراز هویت API",
-                 lab("کد یکتا (User-Agent)", MUT, 12), self.ent_ua,
-                 lab("توکن (Bearer Token)", MUT, 12), self.ent_token,
-                 lab("شناسه فروشگاه (Vendor ID)", MUT, 12), self.ent_vid, b),
-            card("عیب‌یابی و استخراج ساختار",
-                 lab("یک نمونه از کالا، سفارش و رویداد را دریافت و در کلیپ‌بورد کپی می‌کند.", MUT, 11), b2)))
+            card("احراز هویت", lab("کد یکتا (User-Agent)", MUT, 12), self.ent_ua,
+                 lab("توکن", MUT, 12), self.ent_token, lab("شناسه فروشگاه", MUT, 12), self.ent_vid, b),
+            card("نمونه داده‌ها",
+                 lab("یک نمونه از کالا، سفارش و رویداد را می‌گیرد (نام، تلفن و آدرس مشتری پنهان می‌شود) و کپی می‌کند تا برای تنظیم دقیق‌تر بفرستید.", MUT, 11), b2)))
 
         # --- products
-        self.pstats = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(58), spacing=dp(8))
         self.pcount = lab("", MUT, 12, halign="center")
         self.pchips_sv, self.pchips = chip_row()
         self.pdet = lab("", MUT, 11)
-        self.ent_q = inp("جستجو در نام، رنگ، ID یا کد کالا...")
+        self.ent_q = inp("جستجو در نام یا SKU")
         self.ent_q.bind(text=self._on_q)
-        p1 = RBtn("دریافت و بروزرسانی لیست کالاها")
+        p1 = RBtn("بروزرسانی لیست")
         p1.bind(on_release=lambda *_: self.get_products())
         p2 = RBtn("انتخاب همه", ACC2)
         p2.bind(on_release=lambda *_: self.sel_all(True))
         p3 = RBtn("لغو انتخاب", ACC2)
         p3.bind(on_release=lambda *_: self.sel_all(False))
-        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
+        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
         brow.add_widget(p2)
         brow.add_widget(p3)
         p4 = RBtn("ویرایش گروهی کالاهای انتخاب‌شده", (0.20, 0.45, 0.85, 1))
         p4.bind(on_release=lambda *_: self.bulk_edit())
         self.ent_delta = inp("5000", "5000", input_filter="int")
         self.ent_floor = inp("0", "", input_filter="int")
-        u1 = RBtn("پیش‌نمایش و اعمال قیمت زیر نفر اول")
+        u1 = RBtn("پیش‌نمایش و اعمال")
         u1.bind(on_release=lambda *_: self.undercut())
-        self.ent_sku = inp("ID یا SKU کالا (مثلاً z681wQ)")
+        self.ent_sku = inp("SKU")
         self.ent_stock = inp("Stock", "10", input_filter="int")
         self.ent_price = inp("Price", "150000", input_filter="int")
-        m1 = RBtn("به‌روزرسانی سریع کالا")
+        m1 = RBtn("به‌روزرسانی کالا")
         m1.bind(on_release=lambda *_: self.update_product())
         self.pl = vbox()
         self.pl.spacing = dp(10)
         self._add("prod", page(
-            card("مدیریت کالاها", p1, self.pstats, brow, p4, self.pcount, self.ent_q, self.pchips_sv, self.pdet),
-            card("قیمت‌گذاری رقابتی (زیر قیمت بای‌باکس)",
-                 lab("مبلغ کاهش نسبت به قیمت بای‌باکس (ریال/تومان)", MUT, 12), self.ent_delta,
-                 lab("کف قیمت مجاز (اختیاری)", MUT, 12), self.ent_floor, u1,
-                 lab("روی کالاهای تیک‌خورده یا تمام کالاهای «بای‌باکس ندارم» اجرا می‌شود و قبل از ارسال، پیش‌نمایش تغییرات را نشان می‌دهد.", MUT, 11)),
+            card("", p1, brow, p4, self.pcount, self.ent_q, self.pchips_sv, self.pdet),
+            card("قیمت‌گذاری زیر نفر اول",
+                 lab("کاهش از نفر اول (تومان)", MUT, 12), self.ent_delta,
+                 lab("حداقل قیمت مجاز (اختیاری)", MUT, 12), self.ent_floor, u1,
+                 lab("روی کالاهای انتخاب‌شده اعمال می‌شود؛ اگر چیزی انتخاب نشده باشد، روی همه‌ی «بای‌باکس ندارم». قبل از ارسال، لیست تغییرات را می‌بینید و تأیید می‌کنید.", MUT, 11)),
             self.pl,
-            card("ویرایش دستی با شناسه کالا", self.ent_sku, self.ent_stock, self.ent_price, m1)))
+            card("ویرایش دستی با کد کالا", self.ent_sku, self.ent_stock, self.ent_price, m1)))
 
         # --- orders
-        self.ent_sd = inp("YYYY-MM-DD (مثلاً 2026-09-01)")
-        self.ent_ed = inp("YYYY-MM-DD (مثلاً 2026-10-15)")
-        sport re
-        col = {"ok": GRN, "err": RED}.get(kind, TXT)
-        rtl = bool(re.search("[\u0600-\u06FF]", text))
-        t = Label(text=ts, font_name=FONT, font_size=sp(11), color=MUT, size_hint=(None, None),
-                  size=(dp(54), dp(18)), halign="left", valign="top")
-        t.bind(size=lambda i, s: setattr(i, "text_size", s))
-        m = Label(text=fa(text[:6000]), font_name=FONT, font_size=sp(13), color=col,
-                  halign="right" if rtl else "left", valign="top", size_hint_y=None)
-        m.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
-        m.bind(texture_size=lambda i, s: setattr(i, "height", s[1]))
-        m.bind(height=lambda i, h: setattr(self, "height", h + dp(6)))
-        self.add_widget(t)
-        self.add_widget(m)
-
-
-class NavBtn(ToggleButtonBehavior, Label):
-    def __init__(self, text, name, app, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(13), color=MUT,
-                         group="nav", allow_no_selection=False, **kw)
-        self.name, self.app = name, app
-
-    def on_state(self, _w, st):
-        self.color = ACC if st == "down" else MUT
-        if st == "down":
-            self.app.sm.current = self.name
-
-
-class StatusBar(ButtonBehavior, Label):
-    pass
-
-
-class ProdCard(Bg):
-    def __init__(self, o, app, **kw):
-        bcol = (0.18, 0.45, 0.30, 1) if o.bb is True else ((0.45, 0.22, 0.22, 1) if o.lose else (0.16, 0.20, 0.30, 1))
-        super().__init__(color=CARD, radius=12, border_color=bcol, orientation="vertical",
-                         size_hint_y=None, padding=dp(12), spacing=dp(6), **kw)
-        self.o, self.app = o, app
-        self.bind(minimum_height=self.setter("height"))
-        top = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(10))
-        top.bind(minimum_height=top.setter("height"))
-        cb = CheckBox(size_hint=(None, None), size=(dp(34), dp(34)), active=o.sel)
-        cb.bind(active=self._sel)
-        tap = Tap(orientation="vertical", size_hint_y=None, spacing=dp(2))
-        tap.bind(minimum_height=tap.setter("height"))
-        title_txt = o.name + (f"  [{o.variation}]" if o.variation else "")
-        tap.add_widget(lab(title_txt, bold=True, size=14))
-        id_line = f"ID: {o.id}" + (f"  |  SKU: {o.real_sku}" if o.real_sku else "") + (f"  |  کد: {o.product_number}" if o.product_number else "")
-        tap.add_widget(lab(id_line, MUT, 11))
-        tap.bind(on_release=lambda *_: app.edit_product(o))
-        top.add_widget(cb)
-        top.add_widget(tap)
-        self.add_widget(top)
-
-        price_line = f"قیمت: {n(o.price)}"
-        if o.sp:
-            price_line += f"   |   با تخفیف: {n(o.sp)}"
-        price_line += f"   |   موجودی: {n(o.stock)}"
-        self.add_widget(lab(price_line, size=13))
-
-        bs = []
-        if o.inactive:
-            bs.append(badge("غیرفعال", "r"))
-        if o.oos:
-            bs.append(badge("ناموجود", "o"))
-        if o.bb is True:
-            bs.append(badge(f"برنده بای‌باکس ({n(o.comp)})" if o.comp else "برنده بای‌باکس", "g"))
-        elif o.lose:
-            diff = int((o.eff_price or 0) - (o.comp or 0)) if (o.eff_price and o.comp) else 0
-            diff_txt = f" (+{n(diff)})" if diff > 0 else ""
-            bs.append(badge(f"نفر اول: {n(o.comp)}{diff_txt}" if o.comp is not None else "بدون بای‌باکس", "r"))
-        min_v = app.mins.get(o.sku) or app.mins.get(o.id)
-        if min_v:
-            bs.append(badge(f"کف ربات: {n(min_v)}", "n"))
-        if bs:
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(26), spacing=dp(6))
-            row.add_widget(BoxLayout())
-            for b in bs:
-                row.add_widget(b)
-            self.add_widget(row)
-
-    def _sel(self, _i, val):
-        self.o.sel = val
-        self.app.upd_sel()
-
-
-FILT = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"), ("oos", "ناموجود"),
-        ("bb", "بای‌باکس دارم"), ("lose", "بای‌باکس ندارم")]
-
-
-# ---------------- app ----------------
-class SnappShopApp(App):
-    title = "SnappShop Automation"
-
-    def build(self):
-        self.api = None
-        self.vendor_id = ""
-        self.bot_ev = threading.Event()
-        self.bot_on = False
-        self.log_lock = threading.Lock()
-        self.P: List[Any] = []
-        self.PF, self.Q, self.shown = "all", "", 100
-        self.O: List[Any] = []
-        self.OF = "all"
-        self.cfg_path = os.path.join(self.user_data_dir, "cfg.json")
-        self.data_dir = self.user_data_dir
-        self.mins_path = os.path.join(self.data_dir, "mins.json")
-        self.hist_path = os.path.join(self.data_dir, "reprice_history.csv")
-        self.flog_path = os.path.join(self.data_dir, "automation.log")
-        try:
-            with open(self.cfg_path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception:
-            cfg = {}
-        self.auto_cfg = {"bot": False, "interval": 10, "delta": 5000, "maxdrop": 15, "reqmin": True, "winstart": False}
-        self.auto_cfg.update(cfg.get("auto", {}))
-        try:
-            with open(self.mins_path, encoding="utf-8") as f:
-                self.mins = {k: float(v) for k, v in json.load(f).items()}
-        except Exception:
-            self.mins = {}
-
-        root = BoxLayout(orientation="vertical")
-        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(54))
-        header.add_widget(lab("پنل مدیریت و اتوماسیون اسنپ‌شاپ", size=17, bold=True, halign="center"))
-        root.add_widget(header)
-
-        self.status = StatusBar(text="", font_name=FONT, font_size=sp(12), color=MUT,
-                                size_hint_y=None, height=dp(28), halign="center", shorten=True, shorten_from="right")
-        self.status.bind(size=lambda i, s: setattr(i, "text_size", (s[0] - dp(16), None)))
-        self.status.bind(on_release=lambda *_: self.go("log"))
-        root.add_widget(self.status)
-
-        self.sm = ScreenManager(transition=NoTransition())
-
-        # --- connection
-        self.ent_ua = inp("User-Agent", cfg.get("ua", ""))
-        self.ent_token = inp("Bearer Token", cfg.get("token", ""), password=True)
-        self.ent_vid = inp("Vendor ID", cfg.get("vid", ""))
-        b = RBtn("تست اتصال و دریافت شناسه فروشگاه")
-        b.bind(on_release=lambda *_: self.test_connection())
-        b2 = RBtn("دریافت نمونه داده‌ها (JSON)", ACC2)
-        b2.bind(on_release=lambda *_: self.dump_samples())
-        self._add("conn", page(
-            card("احراز هویت API",
-                 lab("کد یکتا (User-Agent)", MUT, 12), self.ent_ua,
-                 lab("توکن (Bearer Token)", MUT, 12), self.ent_token,
-                 lab("شناسه فروشگاه (Vendor ID)", MUT, 12), self.ent_vid, b),
-            card("عیب‌یابی و استخراج ساختار",
-                 lab("یک نمونه از کالا، سفارش و رویداد را دریافت و در کلیپ‌بورد کپی می‌کند.", MUT, 11), b2)))
-
-        # --- products
-        self.pstats = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(58), spacing=dp(8))
-        self.pcount = lab("", MUT, 12, halign="center")
-        self.pchips_sv, self.pchips = chip_row()
-        self.pdet = lab("", MUT, 11)
-        self.ent_q = inp("جستجو در نام، رنگ، ID یا کد کالا...")
-        self.ent_q.bind(text=self._on_q)
-        p1 = RBtn("دریافت و بروزرسانی لیست کالاها")
-        p1.bind(on_release=lambda *_: self.get_products())
-        p2 = RBtn("انتخاب همه", ACC2)
-        p2.bind(on_release=lambda *_: self.sel_all(True))
-        p3 = RBtn("لغو انتخاب", ACC2)
-        p3.bind(on_release=lambda *_: self.sel_all(False))
-        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
-        brow.add_widget(p2)
-        brow.add_widget(p3)
-        p4 = RBtn("ویرایش گروهی کالاهای انتخاب‌شده", (0.20, 0.45, 0.85, 1))
-        p4.bind(on_release=lambda *_: self.bulk_edit())
-        self.ent_delta = inp("5000", "5000", input_filter="int")
-        self.ent_floor = inp("0", "", input_filter="int")
-        u1 = RBtn("پیش‌نمایش و اعمال قیمت زیر نفر اول")
-        u1.bind(on_release=lambda *_: self.undercut())
-        self.ent_sku = inp("ID یا SKU کالا (مثلاً z681wQ)")
-        self.ent_stock = inp("Stock", "10", input_filter="int")
-        self.ent_price = inp("Price", "150000", input_filter="int")
-        m1 = RBtn("به‌روزرسانی سریع کالا")
-        m1.bind(on_release=lambda *_: self.update_product())
-        self.pl = vbox()
-        self.pl.spacing = dp(10)
-        self._add("prod", page(
-            card("مدیریت کالاها", p1, self.pstats, brow, p4, self.pcount, self.ent_q, self.pchips_sv, self.pdet),
-            card("قیمت‌گذاری رقابتی (زیر قیمت بای‌باکس)",
-                 lab("مبلغ کاهش نسبت به قیمت بای‌باکس (ریال/تومان)", MUT, 12), self.ent_delta,
-                 lab("کف قیمت مجاز (اختیاری)", MUT, 12), self.ent_floor, u1,
-                 lab("روی کالاهای تیک‌خورده یا تمام کالاهای «بای‌باکس ندارم» اجرا می‌شود و قبل از ارسال، پیش‌نمایش تغییرات را نشان می‌دهد.", MUT, 11)),
-            self.pl,
-            card("ویرایش دستی با شناسه کالا", self.ent_sku, self.ent_stock, self.ent_price, m1)))
-
-        # --- orders
-        self.ent_sd = inp("YYYY-MM-DD (مثلاً 2026-09-01)")
-        self.ent_ed = inp("YYYY-MM-DD (مثلاً 2026-10-15)")
-        self.ent_ord = inp("شماره سفارش (Order Number)", input_filter="int")
-        o1 = RBtn("دریافت لیست سفارشات")
+        self.ent_sd = inp("YYYY-MM-DD")
+        self.ent_ed = inp("YYYY-MM-DD")
+        self.ent_ord = inp("Order Number", input_filter="int")
+        o1 = RBtn("نمایش لیست سفارشات")
         o1.bind(on_release=lambda *_: self.load_orders())
-        o2 = RBtn("خروجی اکسل فروش (Excel)", (0.18, 0.65, 0.38, 1))
+        o2 = RBtn("گزارش فروش (Excel)", (0.20, 0.65, 0.35, 1))
         o2.bind(on_release=lambda *_: self.export_sales())
-        o3 = RBtn("بررسی رویدادهای جدید سفارشات (Events)", ACC2)
+        o3 = RBtn("رویدادهای زنده سفارشات", ACC2)
         o3.bind(on_release=lambda *_: self.get_events())
-        o4 = RBtn("مشاهده جزئیات سفارش")
+        o4 = RBtn("جزئیات سفارش")
         o4.bind(on_release=lambda *_: self.get_order())
         self.ochips_sv, self.ochips = chip_row()
         self.ol = vbox()
         self.ol.spacing = dp(10)
         self._add("ord", page(
-            card("سفارشات و گزارش حسابداری", lab("از تاریخ (میلادی)", MUT, 12), self.ent_sd,
-                 lab("تا تاریخ (میلادی)", MUT, 12), self.ent_ed, o1, o2),
+            card("سفارشات و گزارش فروش", lab("از تاریخ", MUT, 12), self.ent_sd,
+                 lab("تا تاریخ", MUT, 12), self.ent_ed, o1, o2),
             self.ochips_sv, self.ol,
-            card("جستجوی سفارش و رویدادهای زنده", o3, lab("شماره سفارش", MUT, 12), self.ent_ord, o4)))
+            card("ابزارها", o3, lab("شماره سفارش", MUT, 12), self.ent_ord, o4)))
 
         # --- bot (automation)
         c = self.auto_cfg
         self.ent_bi = inp("Minutes", str(c["interval"]), input_filter="int")
-        self.ent_bd = inp("Amount", str(c["delta"]), input_filter="int")
+        self.ent_bd = inp("Toman", str(c["delta"]), input_filter="int")
         self.ent_bm = inp("%", str(c["maxdrop"]), input_filter="int")
         self.reqmin_btn = RBtn("", ACC2)
         self._reqmin_text()
         self.reqmin_btn.bind(on_release=lambda *_: self.toggle_reqmin())
         self.bot_lbl = lab("وضعیت ربات: خاموش", MUT, 14, bold=True)
         self.bot_last = lab("", MUT, 12)
-        bs1 = RBtn("روشن کردن ربات خودکار", (0.24, 0.78, 0.46, 1))
+        bs1 = RBtn("روشن کردن ربات", (0.30, 0.85, 0.50, 1))
+        bs1.color = (0.04, 0.12, 0.07, 1)
         bs1.bind(on_release=lambda *_: self.start_bot())
-        bs2 = RBtn("توقف ربات", (0.82, 0.26, 0.26, 1))
+        bs2 = RBtn("خاموش کردن ربات", (0.80, 0.26, 0.26, 1))
         bs2.bind(on_release=lambda *_: self.stop_bot())
         bs3 = RBtn("اجرای یک‌باره همین الان", ACC2)
         bs3.bind(on_release=lambda *_: self.bot_once(False))
-        bs4 = RBtn("پیش‌نمایش بدون اعمال تغییر (تست امن)", (0.20, 0.45, 0.85, 1))
+        bs4 = RBtn("پیش‌نمایش بدون اعمال (پیشنهاد می‌شود اول این را بزنید)", (0.20, 0.45, 0.85, 1))
         bs4.bind(on_release=lambda *_: self.bot_once(True))
-        bot_card = card("ربات هوشمند بای‌باکس و رصد سفارشات",
-                        lab("فاصله زمانی هر بررسی (دقیقه)", MUT, 12), self.ent_bi,
-                        lab("چند واحد زیر قیمت بای‌باکس قرار بگیرد", MUT, 12), self.ent_bd,
-                        lab("حداکثر مجاز افت قیمت در هر نوبت (درصد)", MUT, 12), self.ent_bm,
+        bot_card = card("ربات قیمت‌گذاری خودکار (زیر نفر اول)",
+                        lab("هر چند دقیقه یک بار بررسی کند", MUT, 12), self.ent_bi,
+                        lab("چند تومان زیر نفر اول", MUT, 12), self.ent_bd,
+                        lab("حداکثر افت قیمت در هر بار (درصد)", MUT, 12), self.ent_bm,
                         self.reqmin_btn, self.bot_lbl, self.bot_last, bs4, bs1, bs2, bs3,
-                        lab("ربات در پس‌زمینه کالاهایی که بای‌باکس را از دست داده‌اند بررسی کرده و با رعایت کف قیمت شما، قیمت را زیر نفر اول تنظیم می‌کند.", MUT, 11))
+                        lab("ربات فقط کالاهایی را که بای‌باکس ندارند، فعال و موجودند و قیمت نفر اول‌شان معلوم است تغییر می‌دهد، آن هم فقط اگر قیمت جدید از «حداقل قیمت» کمتر نشود. هر تغییر در تاریخچه ثبت می‌شود.", MUT, 11))
         self.mins_lbl = lab("", MUT, 12)
         mcards = [self.mins_lbl]
         if platform != "android":
-            mb1 = RBtn("خروجی فایل کف قیمت‌ها (CSV برای Excel)", ACC2)
+            mb1 = RBtn("ساخت فایل حداقل قیمت (CSV برای Excel)", ACC2)
             mb1.bind(on_release=lambda *_: self.export_mins())
-            mb2 = RBtn("بارگذاری کف قیمت‌ها از فایل CSV", ACC2)
+            mb2 = RBtn("بارگذاری حداقل قیمت‌ها از فایل", ACC2)
             mb2.bind(on_release=lambda *_: self.import_mins())
             mcards += [mb1, mb2]
-        mb3 = RBtn("پاک کردن تمام کف قیمت‌ها", (0.55, 0.22, 0.22, 1))
+        mb3 = RBtn("پاک کردن همه‌ی حداقل قیمت‌ها", (0.55, 0.22, 0.22, 1))
         mb3.bind(on_release=lambda *_: self.clear_mins())
         mcards.append(mb3)
-        mins_card = card("مدیریت کف قیمت کالاها", *mcards)
-        hb = RBtn("دریافت تاریخچه تغییرات ربات (Excel)", ACC2)
+        mins_card = card("حداقل قیمت هر کالا", *mcards)
+        hb = RBtn("تاریخچه‌ی قیمت‌گذاری ربات (Excel)", ACC2)
         hb.bind(on_release=lambda *_: self.export_history())
-        cards_bot = [bot_card, mins_card, card("گزارش عملکرد ربات", hb)]
+        cards_bot = [bot_card, mins_card, card("گزارش", hb)]
         if platform == "win":
             self.winstart_btn = RBtn("", ACC2)
             self._winstart_text()
             self.winstart_btn.bind(on_release=lambda *_: self.toggle_winstart())
-            cards_bot.append(card("تنظیمات ویندوز", self.winstart_btn,
-                                  lab("تا زمانی که ربات روشن است سیستم به حالت Sleep نمی‌رود.", MUT, 11)))
+            cards_bot.append(card("ویندوز", self.winstart_btn,
+                                  lab("وقتی ربات روشن است، ویندوز به حالت خواب نمی‌رود. برنامه را ببندید ربات هم متوقف می‌شود؛ می‌توانید آن را Minimize کنید.", MUT, 11)))
         self._add("auto", page(*cards_bot))
         self.upd_mins_lbl()
 
@@ -759,7 +510,7 @@ class SnappShopApp(App):
         self.log_box.bind(minimum_height=self.log_box.setter("height"))
         self.log_sv = ScrollView(do_scroll_x=False)
         self.log_sv.add_widget(self.log_box)
-        clr = RBtn("پاک کردن صفحه گزارش", ACC2)
+        clr = RBtn("پاک کردن گزارش", ACC2)
         clr.height = dp(42)
         clr.bind(on_release=lambda *_: self.log_box.clear_widgets())
         lp = BoxLayout(orientation="vertical", padding=[dp(12), dp(8), dp(12), 0], spacing=dp(6))
@@ -771,7 +522,7 @@ class SnappShopApp(App):
 
         nav = Bg(color=BAR, size_hint_y=None, height=dp(56))
         self.navs = []
-        for text, name in (("اتصال", "conn"), ("کالاها", "prod"), ("سفارشات", "ord"), ("ربات", "auto"), ("گزارش", "log")):
+        for text, name in (("اتصال", "conn"), ("محصولات", "prod"), ("سفارشات", "ord"), ("ربات", "auto"), ("گزارش", "log")):
             nb = NavBtn(text, name, self)
             self.navs.append(nb)
             nav.add_widget(nb)
@@ -780,7 +531,7 @@ class SnappShopApp(App):
 
         self.render_products()
         self.render_orders()
-        self.log("برنامه آماده به کار است.")
+        self.log("آماده است.")
         if self.auto_cfg.get("bot") and cfg.get("ua") and cfg.get("token") and cfg.get("vid"):
             Clock.schedule_once(lambda dt: self.start_bot(), 2)
             if platform == "win" and "--minimized" in sys.argv:
@@ -831,7 +582,7 @@ class SnappShopApp(App):
             self.log_box.add_widget(LogRow(time.strftime("%H:%M"), text, kind))
             if len(self.log_box.children) > 150:
                 self.log_box.remove_widget(self.log_box.children[-1])
-            self.status.text = fa(text.split("\n")[0][:95])
+            self.status.text = fa(text.split("\n")[0][:90])
             self.status.color = {"ok": GRN, "err": RED}.get(kind, MUT)
             Clock.schedule_once(lambda _: setattr(self.log_sv, "scroll_y", 0), 0.1)
         Clock.schedule_once(_do, 0)
@@ -839,16 +590,15 @@ class SnappShopApp(App):
     # ---- modal
     def modal(self, title, sub, body, buttons, h=0.86):
         mv = ModalView(size_hint=(0.94, h), auto_dismiss=True, background="", background_color=(0, 0, 0, 0),
-                       overlay_color=(0, 0, 0, 0.7))
-        box = Bg(color=CARD, radius=16, border_color=(0.22, 0.30, 0.45, 1),
-                 orientation="vertical", padding=dp(14), spacing=dp(10))
-        box.add_widget(lab(title, ACC, size=16, bold=True))
+                       overlay_color=(0, 0, 0, 0.65))
+        box = Bg(color=CARD, radius=16, orientation="vertical", padding=dp(14), spacing=dp(10))
+        box.add_widget(lab(title, size=16, bold=True))
         if sub:
             box.add_widget(lab(sub, MUT, 12))
         sv = ScrollView(do_scroll_x=False)
         sv.add_widget(body)
         box.add_widget(sv)
-        row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(8))
+        row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
         btns = []
         for text, color, cb in buttons:
             bt = RBtn(text, color)
@@ -868,7 +618,7 @@ class SnappShopApp(App):
     def _save(self):
         try:
             os.makedirs(self.user_data_dir, exist_ok=True)
-            with open(self.cfg_path, "w", encoding="utf-8") as f:
+            with open(self.cfg_path, "w") as f:
                 json.dump({"ua": self.ent_ua.text.strip(), "token": self.ent_token.text.strip(),
                            "vid": self.ent_vid.text.strip(), "auto": self.auto_cfg}, f)
         except Exception:
@@ -877,7 +627,7 @@ class SnappShopApp(App):
     def _setup(self):
         ua, tok = self.ent_ua.text.strip(), self.ent_token.text.strip()
         if not ua or not tok:
-            self.log("کد یکتا (User-Agent) و توکن الزامی است.", "err")
+            self.log("User-Agent و توکن الزامی است.", "err")
             self.go("conn")
             return False
         self.api = SnappShopAutomationAPI(ua, tok)
@@ -889,7 +639,7 @@ class SnappShopApp(App):
         if not self._setup():
             return False
         if not self.vendor_id:
-            self.log("شناسه فروشگاه خالی است. ابتدا «تست اتصال» را بزنید.", "err")
+            self.log("شناسه فروشگاه خالی است. ابتدا تست اتصال بزنید.", "err")
             self.go("conn")
             return False
         return True
@@ -904,11 +654,11 @@ class SnappShopApp(App):
                     self.vendor_id = v
                     self.ent_vid.text = v
                     self._save()
-                    self.log(f"اتصال برقرار شد. شناسه فروشگاه: {v}", "ok")
+                    self.log(f"اتصال موفق. شناسه فروشگاه: {v}", "ok")
                 self.ui(done)
             else:
-                self.log("فروشگاهی برای این توکن یافت نشد.", "err")
-        self.log("در حال تست اتصال...")
+                self.log("شناسه فروشگاهی یافت نشد.", "err")
+        self.log("در حال اتصال...")
         self._run(f)
 
     # ---- products
@@ -924,14 +674,12 @@ class SnappShopApp(App):
 
     def vis(self):
         q = self.Q
-        return [o for o in self.P if self.passf(o) and (
-            not q or q in f"{o.name} {o.variation} {o.sku} {o.id} {o.product_number or ''}".lower()
-        )]
+        return [o for o in self.P if self.passf(o) and (not q or q in (o.name + " " + o.sku).lower())]
 
     def _on_q(self, _i, val):
         self.Q = val.strip().lower()
         Clock.unschedule(self._q_apply)
-        Clock.schedule_once(self._q_apply, 0.3)
+        Clock.schedule_once(self._q_apply, 0.35)
 
     def _q_apply(self, _dt):
         self.shown = 100
@@ -948,24 +696,18 @@ class SnappShopApp(App):
 
     def render_pchips(self):
         self.pchips.clear_widgets()
-        self.pstats.clear_widgets()
-        total_p = len(self.P)
-        bb_win = sum(1 for o in self.P if o.bb is True)
-        bb_lose = sum(1 for o in self.P if o.lose)
-        oos_cnt = sum(1 for o in self.P if o.oos)
-        self.pstats.add_widget(stat_box("بای‌باکس ندارم", n(bb_lose), RED if bb_lose else TXT))
-        self.pstats.add_widget(stat_box("بای‌باکس دارم", n(bb_win), GRN if bb_win else TXT))
-        self.pstats.add_widget(stat_box("ناموجود", n(oos_cnt), AMB if oos_cnt else TXT))
-        self.pstats.add_widget(stat_box("کل کالاها", n(total_p), ACC))
-
+        any_bb = any(o.bb is not None for o in self.P)
+        any_act = any(o.active is not None for o in self.P)
+        any_comp = any(o.comp is not None for o in self.P)
         for key, label in FILT:
             cnt = sum(1 for o in self.P if self._match(key, o))
-            ch = Chip(f"{label} ({cnt})", key, active=(self.PF == key))
+            unk = (key in ("inactive", "active") and not any_act) or (key == "bb" and not any_bb) or (key == "lose" and not any_bb and not any_comp)
+            ch = Chip(f"{label}  {'؟' if unk else cnt}", key, active=(self.PF == key))
             ch.bind(on_release=lambda c: self.set_pf(c.key))
             self.pchips.add_widget(ch)
         if self.P:
             d = self.P[0].det
-            self.pdet.text = fa("وضعیت فیلدها — " + " · ".join(f"{k}: {'OK' if v else '—'}" for k, v in d.items()))
+            self.pdet.text = fa("فیلدها — " + " · ".join(f"{k}: {v if v else 'پیدا نشد'}" for k, v in d.items()))
         else:
             self.pdet.text = ""
 
@@ -980,7 +722,7 @@ class SnappShopApp(App):
             more.bind(on_release=lambda *_: self._more())
             self.pl.add_widget(more)
         if not L:
-            self.pl.add_widget(lab("موردی یافت نشد." if self.P else "برای شروع، دکمه «دریافت و بروزرسانی لیست کالاها» را بزنید.", MUT, 13, halign="center"))
+            self.pl.add_widget(lab("موردی پیدا نشد." if self.P else "برای نمایش، «بروزرسانی لیست» را بزنید.", MUT, 13, halign="center"))
         self.upd_sel()
 
     def _more(self):
@@ -989,7 +731,7 @@ class SnappShopApp(App):
 
     def upd_sel(self):
         k = sum(1 for o in self.P if o.sel)
-        self.pcount.text = fa((f"نمایش {n(len(self.vis()))} کالا" + (f"  |  {n(k)} انتخاب‌شده" if k else "")) if self.P else "")
+        self.pcount.text = fa((f"{n(len(self.vis()))} کالا" + (f" · {n(k)} انتخاب" if k else "")) if self.P else "")
 
     def sel_all(self, on):
         for o in self.vis():
@@ -1006,23 +748,28 @@ class SnappShopApp(App):
                 self.PF, self.shown = "all", 100
                 self.render_products()
                 nb = sum(1 for o in self.P if o.lose)
-                wb = sum(1 for o in self.P if o.bb is True)
-                self.log(f"دریافت شد: {len(raw)} کالا  |  بای‌باکس دارم: {wb}  |  بای‌باکس ندارم: {nb}", "ok")
+                has = any(o.bb is not None or o.comp is not None for o in self.P)
+                self.log(f"تعداد محصولات: {len(raw)}" + (f" · بدون بای‌باکس: {nb}" if has else ""), "ok")
             self.ui(done)
-        self.log("در حال دریافت لیست محصولات از اسنپ‌شاپ...")
+        self.log("در حال دریافت محصولات...")
         self._run(f)
+
+    @staticmethod
+    def _clean(item):
+        out = {}
+        for k, v in item.items():
+            if v is None:
+                continue
+            out[k] = int(v) if k in ("price", "stock") else v
+        return out
 
     def edit_product(self, o):
         ep = inp("Price", "" if o.price is None else str(int(o.price)), input_filter="int")
         es = inp("Stock", "" if o.stock is None else str(int(o.stock)), input_filter="int")
-        cur_min = self.mins.get(o.sku) or self.mins.get(o.id)
-        em = inp("Min Price", str(int(cur_min)) if cur_min else "", input_filter="int")
+        em = inp("Min", str(int(self.mins[o.sku])) if o.sku in self.mins else "", input_filter="int")
         body = vbox()
-        info_txt = f"قیمت بای‌باکس فعلی: {n(o.comp)}" + (f"  |  کف مجاز اسنپ: {n(o.ref_min)}" if o.ref_min else "")
-        for w in (lab(info_txt, AMB if o.lose else GRN, 12),
-                  lab("قیمت پایه (ریال/تومان)", MUT, 12), ep,
-                  lab("موجودی", MUT, 12), es,
-                  lab("حداقل قیمت مجاز برای ربات (اختیاری)", MUT, 12), em):
+        for w in (lab("قیمت (تومان)", MUT, 12), ep, lab("موجودی", MUT, 12), es,
+                  lab("حداقل قیمت برای ربات (اختیاری)", MUT, 12), em):
             body.add_widget(w)
         def save():
             pr = int(ep.text) if ep.text.strip() else None
@@ -1033,30 +780,30 @@ class SnappShopApp(App):
                     self.mins[o.sku] = float(mn)
                 else:
                     self.mins.pop(o.sku, None)
-                    self.mins.pop(o.id, None)
                 self._save_mins()
                 self.upd_mins_lbl()
             unchanged = (pr is None or pr == o.price) and (st is None or st == o.stock)
             if unchanged:
                 self.render_products()
-                self.log(f"کف قیمت ذخیره شد: {o.sku}", "ok")
+                self.log(f"ذخیره شد: {o.sku}", "ok")
                 return
             if not self._need_vid():
                 return False
-            new_p = pr if pr is not None else o.price
-            new_s = st if st is not None else o.stock
-            item = o.item(new_p, new_s)
+            if not o.sku:
+                self.log("کد کالا (SKU) پیدا نشد.", "err")
+                return False
+            item = self._clean({"sku": o.sku, "price": pr if pr is not None else o.price,
+                                "stock": st if st is not None else o.stock})
             def f():
                 self.api.update_products(self.vendor_id, [item])
                 def done():
-                    o.price, o.stock = new_p, new_s
+                    o.price, o.stock = item.get("price"), item.get("stock")
                     o.calc()
                     self.render_products()
-                    self.log(f"بروزرسانی شد: {o.sku} (قیمت: {n(new_p)}، موجودی: {n(new_s)})", "ok")
+                    self.log(f"ذخیره شد: {o.sku}", "ok")
                 self.ui(done)
             self._run(f)
-        sub_txt = f"ID: {o.id}" + (f"  |  {o.variation}" if o.variation else "")
-        self.modal(o.name, sub_txt, body, [("انصراف", ACC2, None), ("ذخیره تغییرات", ACC, save)], h=0.76)
+        self.modal(o.name, o.sku, body, [("انصراف", ACC2, None), ("ذخیره", ACC, save)], h=0.72)
 
     @staticmethod
     def _fnum(text):
@@ -1068,23 +815,23 @@ class SnappShopApp(App):
     def bulk_edit(self):
         sel = [o for o in self.P if o.sel]
         if not sel:
-            self.log("ابتدا کالاهای مورد نظر را تیک بزنید.", "err")
+            self.log("ابتدا کالاهای مورد نظر را انتخاب کنید (تیک بزنید).", "err")
             return
         if not self._need_vid():
             return
         e_pct, e_amt = inp("مثلاً -5 یا 3"), inp("مثلاً -5000")
         e_stk, e_min = inp("مثلاً 10"), inp("مثلاً 10")
         body = vbox()
-        for w in (lab("تغییر قیمت درصدی (منفی = کاهش)", MUT, 12), e_pct,
-                  lab("تغییر قیمت مبلغی (منفی = کاهش)", MUT, 12), e_amt,
-                  lab("تنظیم موجودی روی عدد ثابت", MUT, 12), e_stk,
-                  lab("تنظیم کف ربات = چند درصد زیر قیمت جدید کالا", MUT, 12), e_min):
+        for w in (lab("تغییر قیمت: درصد (منفی = کاهش)", MUT, 12), e_pct,
+                  lab("تغییر قیمت: مبلغ تومان (منفی = کاهش)", MUT, 12), e_amt,
+                  lab("تنظیم موجودی روی عدد", MUT, 12), e_stk,
+                  lab("حداقل قیمت ربات = چند درصد پایین‌تر از قیمت (جدید) کالا", MUT, 12), e_min):
             body.add_widget(w)
         def apply():
             pct, amt = self._fnum(e_pct.text), self._fnum(e_amt.text)
             stk, mp = self._fnum(e_stk.text), self._fnum(e_min.text)
             if pct is None and amt is None and stk is None and mp is None:
-                self.log("هیچ مقداری وارد نشده است.", "err")
+                self.log("هیچ تغییری وارد نشده است.", "err")
                 return False
             if pct is not None and abs(pct) > 50:
                 self.log("تغییر قیمت بیش از ۵۰٪ مجاز نیست.", "err")
@@ -1093,7 +840,7 @@ class SnappShopApp(App):
                 self.log("موجودی نمی‌تواند منفی باشد.", "err")
                 return False
             if mp is not None and not (0 <= mp < 100):
-                self.log("درصد کف قیمت باید بین ۰ و ۱۰۰ باشد.", "err")
+                self.log("درصد حداقل قیمت باید بین ۰ و ۱۰۰ باشد.", "err")
                 return False
             changes = []
             for o in sel:
@@ -1118,11 +865,11 @@ class SnappShopApp(App):
                 for o in sel:
                     o.sel = False
                 self.render_products()
-                self.log("کف قیمت‌ها ثبت شد." if mp is not None else "تغییری نیاز نبود.", "ok")
+                self.log("حداقل قیمت‌ها ثبت شد." if mp is not None else "تغییری لازم نبود.", "ok")
                 return
-            items = [o.item(p, st) for o, p, st in changes]
+            items = [self._clean({"sku": o.sku, "price": p, "stock": st}) for o, p, st in changes]
             self.go("log")
-            self.log(f"در حال ارسال ویرایش گروهی برای {len(items)} کالا...")
+            self.log(f"در حال اعمال ویرایش گروهی روی {len(items)} کالا...")
             def f():
                 self.api.update_products(self.vendor_id, items)
                 def done():
@@ -1132,23 +879,21 @@ class SnappShopApp(App):
                     for o in sel:
                         o.sel = False
                     self.render_products()
-                    self.log(f"ویرایش گروهی روی {len(items)} کالا با موفقیت انجام شد.", "ok")
+                    self.log(f"ویرایش گروهی روی {len(items)} کالا انجام شد.", "ok")
                 self.ui(done)
             self._run(f)
-        self.modal("ویرایش گروهی", f"{n(len(sel))} کالا انتخاب شده است.", body,
-                   [("انصراف", ACC2, None), ("اعمال تغییرات", ACC, apply)], h=0.8)
+        self.modal("ویرایش گروهی", f"{n(len(sel))} کالا انتخاب شده است. فقط فیلدهای پرشده اعمال می‌شود.", body,
+                   [("انصراف", ACC2, None), ("اعمال", ACC, apply)], h=0.8)
 
     def update_product(self):
         if not self._need_vid():
             return
-        ident, st, pr = self.ent_sku.text.strip(), self.ent_stock.text.strip(), self.ent_price.text.strip()
-        if not (ident and st and pr):
-            self.log("شناسه کالا، موجودی و قیمت الزامی است.", "err")
+        sku, st, pr = self.ent_sku.text.strip(), self.ent_stock.text.strip(), self.ent_price.text.strip()
+        if not (sku and st and pr):
+            self.log("کد کالا، موجودی و قیمت الزامی است.", "err")
             return
-        matched = next((x for x in self.P if ident in (x.id, x.sku, x.real_sku, str(x.product_number or ""))), None)
-        payload = matched.item(int(pr), int(st)) if matched else {"id": ident, "sku": ident, "stock": int(st), "price": int(pr)}
         def f():
-            r = self.api.update_products(self.vendor_id, [payload])
+            r = self.api.update_products(self.vendor_id, [{"sku": sku, "stock": int(st), "price": int(pr)}])
             self.log("به‌روزرسانی انجام شد.\n" + json.dumps(r, ensure_ascii=False, indent=2), "ok")
         self._run(f)
 
@@ -1162,10 +907,10 @@ class SnappShopApp(App):
 
     def undercut(self):
         if not self.P:
-            self.log("ابتدا لیست کالاها را دریافت کنید.", "err")
+            self.log("ابتدا لیست محصولات را بروزرسانی کنید.", "err")
             return
         if not any(o.comp is not None for o in self.P):
-            self.log("قیمت بای‌باکس در داده‌ها یافت نشد.", "err")
+            self.log("قیمت نفر اول در داده‌های API پیدا نشد. «دریافت نمونه داده‌ها» را بزنید و برای تنظیم بفرستید.", "err")
             return
         if not self._need_vid():
             return
@@ -1173,7 +918,7 @@ class SnappShopApp(App):
         floor = self._int(self.ent_floor.text, 0)
         rows, skipped = plan_undercut(self.P, delta, floor)
         if not rows:
-            self.log("کالایی برای کاهش قیمت یافت نشد." + (f" ({skipped} بدون قیمت بای‌باکس)" if skipped else ""), "err")
+            self.log("کالایی برای قیمت‌گذاری پیدا نشد." + (f" ({skipped} کالا بدون قیمت نفر اول)" if skipped else ""), "err")
             return
         rows = rows[:300]
         body = vbox()
@@ -1183,25 +928,24 @@ class SnappShopApp(App):
             row.bind(minimum_height=row.setter("height"))
             cb = CheckBox(size_hint=(None, None), size=(dp(30), dp(30)), active=not r["why"], disabled=bool(r["why"]))
             checks.append(cb)
-            title = r["o"].name + (f" [{r['o'].variation}]" if r["o"].variation else "")
-            txt = title + (("\n" + r["why"]) if r["why"] else f"\nبای‌باکس: {n(r['o'].comp)}")
-            t = lab(txt, MUT if r["why"] else TXT, 12.5)
-            v = lab(f"{n(r['o'].price)} ← {n(r['np'])}", GRN if not r["why"] else MUT, 12, halign="left")
+            txt = r["o"].name + (("\n" + r["why"]) if r["why"] else "")
+            t = lab(txt, MUT if r["why"] else TXT, 13)
+            v = lab(f"{n(r['o'].price)} ← {n(r['np'])}", TXT, 12, halign="left")
             v.size_hint_x = None
-            v.width = dp(155)
+            v.width = dp(150)
             row.add_widget(cb)
             row.add_widget(t)
             row.add_widget(v)
             body.add_widget(row)
         ok = sum(1 for r in rows if not r["why"])
-        sub = f"{n(delta)} واحد زیر قیمت بای‌باکس" + (f" · {n(skipped)} رد شده" if skipped else "")
+        sub = f"هر قیمت {n(delta)} تومان زیر نفر اول" + (f" · {n(skipped)} کالا بدون قیمت نفر اول نادیده گرفته شد" if skipped else "")
         def apply():
             chosen = [r for r, cb in zip(rows, checks) if cb.active and not r["why"]]
             if not chosen:
                 return
             self.go("log")
-            self.log(f"در حال اعمال قیمت رقابتی روی {len(chosen)} کالا...")
-            items = [r["o"].item(r["np"], r["o"].stock) for r in chosen]
+            self.log(f"در حال اعمال قیمت‌ها روی {len(chosen)} کالا...")
+            items = [self._clean({"sku": r["o"].sku, "price": r["np"], "stock": r["o"].stock}) for r in chosen]
             def f():
                 self.api.update_products(self.vendor_id, items)
                 def done():
@@ -1210,10 +954,10 @@ class SnappShopApp(App):
                         r["o"].sel = False
                         r["o"].calc()
                     self.render_products()
-                    self.log(f"قیمت {len(chosen)} کالا با موفقیت به زیر بای‌باکس تغییر یافت.", "ok")
+                    self.log(f"قیمت {len(chosen)} کالا بروزرسانی شد. برای دیدن وضعیت بای‌باکس، لیست را بروزرسانی کنید.", "ok")
                 self.ui(done)
             self._run(f)
-        mv, btns = self.modal("پیش‌نمایش قیمت‌گذاری رقابتی", sub, body,
+        mv, btns = self.modal("پیش‌نمایش قیمت‌گذاری", sub, body,
                               [("انصراف", ACC2, None), (f"اعمال روی {n(ok)} کالا", ACC, apply)])
         def upd(*_):
             k = sum(1 for r, cb in zip(rows, checks) if cb.active and not r["why"])
@@ -1238,42 +982,35 @@ class SnappShopApp(App):
                 cnt[o.status] = cnt.get(o.status, 0) + 1
                 snd += 1 if o.snd else 0
             def addc(label, key, c):
-                ch = Chip(f"{label} ({c})", key, active=(self.OF == key))
+                ch = Chip(f"{label}  {c}", key, active=(self.OF == key))
                 ch.bind(on_release=lambda x: self.set_of(x.key))
                 self.ochips.add_widget(ch)
             addc("همه", "all", len(self.O))
-            if snd:
-                addc("در حال ارسال", "snd", snd)
+            addc("ارسال‌شده، تحویل‌نشده", "snd", snd)
             for s, c in cnt.items():
                 addc(s or "—", "st:" + s, c)
         L = [o for o in self.O if self.OF == "all" or (self.OF == "snd" and o.snd) or self.OF == "st:" + o.status]
         for o in L[:150]:
-            c = TapBg(color=CARD, radius=12, border_color=(0.16, 0.21, 0.31, 1),
-                      orientation="vertical", size_hint_y=None, padding=dp(12), spacing=dp(5))
+            c = TapBg(color=CARD, radius=12, orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(4))
             c.bind(minimum_height=c.setter("height"))
-            head_txt = f"سفارش #{o.num}" + (f"   ({o.items_count} قلم)" if o.items_count else "")
-            c.add_widget(lab(head_txt, bold=True, size=14))
-            sub_info = o.date + (f"   |   بازه تحویل: {o.pickup}" if o.pickup else "")
-            c.add_widget(lab(sub_info, MUT, 11))
-            meta = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(26), spacing=dp(6))
+            c.add_widget(lab(f"سفارش {o.num}", bold=True, size=14))
+            c.add_widget(lab(o.date, MUT, 11))
+            meta = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(24), spacing=dp(6))
             meta.add_widget(BoxLayout())
             if o.total is not None:
-                tl = lab(f"مبلغ: {n(o.total)}", GRN, 13, bold=True)
+                tl = lab(f"مبلغ: {n(o.total)}", TXT, 13)
                 tl.size_hint_x = None
-                tl.width = dp(165)
+                tl.width = dp(150)
                 meta.add_widget(tl)
-            if o.delivery_type:
-                meta.add_widget(badge(o.delivery_type, "n"))
             if o.status:
-                bkind = "r" if o.canceled else ("g" if (o.delivered or "تایید" in o.status) else "o")
-                meta.add_widget(badge(o.status, bkind))
+                meta.add_widget(badge(o.status, "g" if o.delivered else "o" if o.snd else "n"))
             c.add_widget(meta)
             c.bind(on_release=lambda w, num=o.num: self.open_order(num))
             self.ol.add_widget(c)
         if len(L) > 150:
-            self.ol.add_widget(lab("۱۵۰ سفارش اول نمایش داده شد.", MUT, 11, halign="center"))
+            self.ol.add_widget(lab("فقط ۱۵۰ مورد اول نمایش داده شد.", MUT, 11, halign="center"))
         if not L:
-            self.ol.add_widget(lab("سفارشی یافت نشد." if self.O else "برای مشاهده، «دریافت لیست سفارشات» را بزنید.", MUT, 13, halign="center"))
+            self.ol.add_widget(lab("موردی پیدا نشد." if self.O else "برای نمایش، «نمایش لیست سفارشات» را بزنید.", MUT, 13, halign="center"))
 
     def set_of(self, key):
         self.OF = key
@@ -1288,8 +1025,7 @@ class SnappShopApp(App):
                 self.O = [norm_order(o, i) for i, o in enumerate(d)]
                 self.OF = "all"
                 self.render_orders()
-                tot_sum = sum(o.total or 0 for o in self.O)
-                self.log(f"تعداد سفارشات: {len(self.O)}  |  جمع کل: {n(tot_sum)}", "ok")
+                self.log(f"تعداد سفارشات: {len(self.O)} · ارسال‌شده و تحویل‌نشده: {sum(1 for o in self.O if o.snd)}", "ok")
             self.ui(done)
         self.log("در حال دریافت سفارشات...")
         self._run(f)
@@ -1302,30 +1038,20 @@ class SnappShopApp(App):
             d = r.get("data", r) if isinstance(r, dict) else r
             def done():
                 body = vbox()
-                body.spacing = dp(4)
-                arr = first_array(d) if isinstance(d, dict) else None
-                if arr:
-                    body.add_widget(lab("اقلام سفارش:", ACC, 13, bold=True))
-                    prod_by_id = {p.id: p for p in self.P if p.id}
-                    for it in arr:
-                        pid = str(it.get("inventory_product_id") or it.get("id") or "")
-                        pr_obj = prod_by_id.get(pid)
-                        pname = (pr_obj.name + (f" [{pr_obj.variation}]" if pr_obj.variation else "")) if pr_obj else f"شناسه کالا: {pid}"
-                        qty = it.get("quantity", 1)
-                        fp = to_num_safe(it.get("final_price"))
-                        body.add_widget(lab(f"• {pname}\n  تعداد: {qty}  |  مبلغ نهایی: {n(fp)}  |  وضعیت: {it.get('item_status', '')}", TXT, 12))
+                body.spacing = dp(2)
                 rows = [(k, v) for k, v in flat(d) if not isinstance(v, (dict, list))][:120]
                 for k, v in rows:
                     row = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(8))
                     row.bind(minimum_height=row.setter("height"))
                     kl = lab(k, MUT, 11, halign="left")
-                    kl.size_hint_x = 0.45
+                    kl.size_hint_x = 0.42
                     vl = lab(str(v), TXT, 12, halign="right")
                     row.add_widget(kl)
                     row.add_widget(vl)
                     body.add_widget(row)
+                arr = first_array(d) if isinstance(d, dict) else None
                 sub = f"{len(arr)} ردیف کالا در سفارش" if arr else ""
-                self.modal(f"جزئیات سفارش #{num}", sub, body, [("بستن", ACC2, None)])
+                self.modal(f"سفارش {num}", sub, body, [("بستن", ACC2, None)])
             self.ui(done)
         self._run(f)
 
@@ -1341,9 +1067,9 @@ class SnappShopApp(App):
             return
         def f():
             e = self.api.get_all_latest_events(self.vendor_id)
-            self.log(f"تعداد رویدادهای دریافتی: {len(e)}", "ok")
-            for ev in e[:30]:
-                self.log(event_line(ev))
+            self.log(f"تعداد رویدادها: {len(e)}", "ok")
+            if e:
+                self.log(json.dumps(e, ensure_ascii=False, indent=2))
         self.go("log")
         self._run(f)
 
@@ -1355,7 +1081,7 @@ class SnappShopApp(App):
             if r:
                 return str(r)
         except Exception as e:
-            self.log(f"ذخیره اشتراکی ناموفق: {e}", "err")
+            self.log(f"ذخیره‌ی مشترک ناموفق بود: {e}", "err")
         try:
             dst = "/storage/emulated/0/Download/" + os.path.basename(path)
             shutil.copy(path, dst)
@@ -1376,11 +1102,11 @@ class SnappShopApp(App):
         def f():
             d = self._orders_list()
             if not d:
-                self.log("سفارشی در این بازه یافت نشد.", "err")
+                self.log("سفارشی در این بازه پیدا نشد.", "err")
                 return
             if not any(first_array(o) for o in d[:3]):
                 ids = [norm_order(o, 0).num for o in d[:500]]
-                self.log(f"در حال دریافت جزئیات {len(ids)} سفارش...")
+                self.log(f"ردیف کالاها در لیست نیست؛ دریافت جزئیات {len(ids)} سفارش...")
                 def one(k):
                     try:
                         r = self.api.get_order_details(self.vendor_id, ids[k])
@@ -1389,11 +1115,11 @@ class SnappShopApp(App):
                         return d[k]
                 with ThreadPoolExecutor(4) as ex:
                     d = list(ex.map(one, range(len(ids))))
-            data = build_sales_workbook(d, self.P if self.P else None)
+            data = build_sales_workbook(d)
             shown = self.write_report("sales-" + time.strftime("%Y-%m-%d") + ".xlsx", data)
-            self.log(f"فایل اکسل فروش ساخته شد ({len(d)} سفارش):\n{shown}", "ok")
+            self.log(f"گزارش آماده شد (۳ شیت: ریز سفارشات، خلاصه کالا، خلاصه روزانه): {len(d)} سفارش.\n{shown}", "ok")
         self.go("log")
-        self.log("در حال آماده‌سازی گزارش اکسل فروش...")
+        self.log("در حال دریافت سفارشات برای گزارش...")
         self._run(f)
 
     # ---- sample data (redacted)
@@ -1430,7 +1156,7 @@ class SnappShopApp(App):
                 except Exception:
                     copied = False
                 self.log(txt[:5000] + ("\n..." if len(txt) > 5000 else ""))
-                self.log("نمونه داده‌ها " + ("در کلیپ‌بورد کپی شد." if copied else "در گزارش چاپ شد."), "ok")
+                self.log("نمونه‌ها " + ("کپی شد؛ در چت Paste کنید." if copied else "آماده شد (کپی نشد؛ از گزارش انتخاب کنید)."), "ok")
             self.ui(done)
         self.go("log")
         self.log("در حال دریافت نمونه‌ها...")
@@ -1438,32 +1164,32 @@ class SnappShopApp(App):
 
     # ---- bot (unattended automation)
     def _reqmin_text(self):
-        self.reqmin_btn.set_text("تغییر فقط برای کالاهای دارای کف قیمت: " + ("بله (ایمن)" if self.auto_cfg["reqmin"] else "خیر (همه کالاها)"))
+        self.reqmin_btn.set_text("فقط کالاهای دارای حداقل قیمت: " + ("بله" if self.auto_cfg["reqmin"] else "خیر"))
 
     def toggle_reqmin(self):
         self.auto_cfg["reqmin"] = not self.auto_cfg["reqmin"]
         self._reqmin_text()
         self._save()
         if not self.auto_cfg["reqmin"]:
-            self.log("توجه: در این حالت ربات بدون نیاز به کف قیمت، تا سقف درصد مجاز قیمت را کاهش می‌دهد.", "err")
+            self.log("هشدار: بدون حداقل قیمت، ربات فقط به سقف افت درصدی تکیه می‌کند.", "err")
 
     def _save_mins(self):
         try:
             os.makedirs(self.data_dir, exist_ok=True)
-            with open(self.mins_path, "w", encoding="utf-8") as f:
+            with open(self.mins_path, "w") as f:
                 json.dump(self.mins, f)
         except Exception:
             pass
 
     def upd_mins_lbl(self):
-        self.mins_lbl.text = fa(f"تعداد کالاهای دارای کف قیمت ثبت‌شده: {n(len(self.mins))} کالا")
+        self.mins_lbl.text = fa(f"حداقل قیمت ثبت‌شده برای {n(len(self.mins))} کالا")
 
     def clear_mins(self):
         self.mins.clear()
         self._save_mins()
         self.upd_mins_lbl()
         self.render_products()
-        self.log("تمام کف قیمت‌ها پاک شد.", "ok")
+        self.log("همه‌ی حداقل قیمت‌ها پاک شد.", "ok")
 
     def out_dir(self):
         if platform == "android":
@@ -1477,11 +1203,11 @@ class SnappShopApp(App):
 
     def export_mins(self):
         if not self.P:
-            self.log("ابتدا در تب کالاها لیست محصولات را دریافت کنید.", "err")
+            self.log("ابتدا در صفحه‌ی محصولات «بروزرسانی لیست» را بزنید.", "err")
             return
         path = os.path.join(self.out_dir(), "min_prices.csv")
         write_mins_csv(path, self.P, self.mins)
-        self.log("فایل ساخته شد:\n" + path + "\nستون min_price را پر کرده و دوباره بارگذاری کنید.", "ok")
+        self.log("فایل ساخته شد:\n" + path + "\nدر Excel ستون min_price را پر کنید، با همین فرمت CSV ذخیره کنید و «بارگذاری» بزنید.", "ok")
 
     def import_mins(self):
         path = os.path.join(self.out_dir(), "min_prices.csv")
@@ -1491,22 +1217,22 @@ class SnappShopApp(App):
         try:
             m = read_mins_csv(path)
         except Exception as e:
-            self.log(f"خطا در خواندن فایل: {e}", "err")
+            self.log(f"خواندن فایل ناموفق بود: {e}", "err")
             return
         self.mins.update(m)
         self._save_mins()
         self.upd_mins_lbl()
         self.render_products()
-        self.log(f"کف قیمت {len(m)} کالا با موفقیت بارگذاری شد.", "ok")
+        self.log(f"حداقل قیمت {len(m)} کالا از فایل بارگذاری شد.", "ok")
 
     def _read_bot_cfg(self):
         c = self.auto_cfg
-        c["interval"] = max(1, self._int(self.ent_bi.text, 10))
+        c["interval"] = max(2, self._int(self.ent_bi.text, 10))
         c["delta"] = max(0, self._int(self.ent_bd.text, 5000))
         c["maxdrop"] = min(90, max(1, self._int(self.ent_bm.text, 15)))
 
     def _set_bot_label(self, on):
-        self.bot_lbl.text = fa("وضعیت ربات: روشن و در حال رصد" if on else "وضعیت ربات: خاموش")
+        self.bot_lbl.text = fa("وضعیت ربات: روشن" if on else "وضعیت ربات: خاموش")
         self.bot_lbl.color = GRN if on else MUT
 
     def _keep_awake(self, on):
@@ -1525,12 +1251,12 @@ class SnappShopApp(App):
             pass
 
     def _winstart_text(self):
-        self.winstart_btn.set_text("اجرای خودکار با روشن شدن ویندوز: " + ("فعال" if self.auto_cfg.get("winstart") else "غیرفعال"))
+        self.winstart_btn.set_text("اجرا با روشن شدن ویندوز: " + ("بله" if self.auto_cfg.get("winstart") else "خیر"))
 
     def toggle_winstart(self):
         on = not self.auto_cfg.get("winstart")
         if on and not getattr(sys, "frozen", False):
-            self.log("این قابلیت فقط در فایل EXE کار می‌کند.", "err")
+            self.log("این گزینه فقط در نسخه‌ی EXE کار می‌کند.", "err")
             return
         try:
             import winreg
@@ -1544,12 +1270,12 @@ class SnappShopApp(App):
                     pass
             winreg.CloseKey(k)
         except Exception as e:
-            self.log(f"خطا در ثبت استارت‌آپ ویندوز: {e}", "err")
+            self.log(f"تنظیم اجرای خودکار ناموفق بود: {e}", "err")
             return
         self.auto_cfg["winstart"] = on
         self._save()
         self._winstart_text()
-        self.log("اجرای خودکار با ویندوز " + ("فعال شد." if on else "غیرفعال شد."), "ok")
+        self.log("اجرا با روشن شدن ویندوز " + ("فعال شد." if on else "غیرفعال شد."), "ok")
 
     def _history(self, changes):
         new = not os.path.exists(self.hist_path)
@@ -1565,26 +1291,26 @@ class SnappShopApp(App):
     def reprice_cycle(self, dry=False):
         raw = self.api.get_all_products(self.vendor_id)
         P = [norm_prod(p, i) for i, p in enumerate(raw)]
-        self.ui(lambda: setattr(self, "P", P) or self.render_products())
         if not any(o.comp is not None for o in P):
-            self.log("ربات: فیلد buy_box در پاسخ API یافت نشد.", "err")
+            self.log("ربات: قیمت نفر اول در داده‌های API پیدا نشد. «دریافت نمونه داده‌ها» را بزنید و برای تنظیم بفرستید.", "err")
             return
         c = self.auto_cfg
         changes, skips = plan_auto(P, int(c["delta"]), self.mins, float(c["maxdrop"]), bool(c["reqmin"]))
+        by = {o.sku: o for o in P}
         if dry:
-            for ch in changes[:20]:
-                self.log(f"[پیش‌نمایش] {ch['sku']} {ch['name'][:30]}: {n(ch['old'])} ← {n(ch['new'])} (بای‌باکس: {n(ch['comp'])})")
+            for ch in changes[:15]:
+                self.log(f"{ch['sku']} {ch['name'][:30]}: {n(ch['old'])} ← {n(ch['new'])} (نفر اول {n(ch['comp'])})")
         elif changes:
-            items = [ch["o"].item(ch["new"], ch["o"].stock) for ch in changes]
+            items = [self._clean({"sku": x["sku"], "price": x["new"], "stock": by[x["sku"]].stock}) for x in changes]
             self.api.update_products(self.vendor_id, items)
             self._history(changes)
         losing = sum(1 for o in P if o.lose)
         sk = " · ".join(f"{k}: {len(v)}" for k, v in skips.items())
-        self.log(("پیش‌نمایش ربات" if dry else "اجرای ربات") + f": {len(P)} کالا | بدون بای‌باکس: {losing} | "
-                 + ("قابل تغییر: " if dry else "آپدیت‌شده: ") + str(len(changes)) + (f" | رد شده — {sk}" if sk else ""),
+        self.log(("پیش‌نمایش ربات" if dry else "ربات") + f": {len(P)} کالا · بدون بای‌باکس {losing} · "
+                 + ("قابل تغییر " if dry else "تغییر ") + str(len(changes)) + (f" · نادیده — {sk}" if sk else ""),
                  "ok" if changes else "info")
         if not dry:
-            stamp = fa(f"آخرین بررسی: {time.strftime('%H:%M:%S')} — {len(changes)} تغییر قیمت")
+            stamp = fa(f"آخرین اجرا: {time.strftime('%H:%M')} — {len(changes)} تغییر قیمت")
             self.ui(lambda: setattr(self.bot_last, "text", stamp))
 
     def bot_once(self, dry=False):
@@ -1593,7 +1319,7 @@ class SnappShopApp(App):
         self._read_bot_cfg()
         self._save()
         self.go("log")
-        self.log("در حال اجرای نوبت ربات...")
+        self.log("در حال اجرای ربات (یک بار)...")
         self._run(lambda: self.reprice_cycle(dry=dry))
 
     def start_bot(self):
@@ -1603,7 +1329,7 @@ class SnappShopApp(App):
             return
         self._read_bot_cfg()
         if self.auto_cfg["reqmin"] and not self.mins:
-            self.log("هشدار: هنوز کف قیمتی ثبت نکرده‌اید؛ برای تغییر خودکار یا کف قیمت تعریف کنید یا گزینه «فقط کالاهای دارای کف قیمت» را غیرفعال کنید.", "err")
+            self.log("هیچ حداقل قیمتی ثبت نشده؛ تا آن موقع ربات هیچ کالایی را تغییر نمی‌دهد. (محصولات ← ویرایش گروهی ← حداقل قیمت)", "err")
         self.auto_cfg["bot"] = True
         self._save()
         ev = threading.Event()
@@ -1612,13 +1338,13 @@ class SnappShopApp(App):
         self._set_bot_label(True)
         self._keep_awake(True)
         iv = self.auto_cfg["interval"]
-        self.log(f"ربات فعال شد (دوره بررسی: هر {iv} دقیقه).", "ok")
+        self.log(f"ربات روشن شد؛ هر {iv} دقیقه بررسی می‌کند.", "ok")
         def loop():
             while not ev.is_set():
                 try:
                     self.reprice_cycle()
                 except Exception as e:
-                    self.log(f"خطا در چرخه ربات: {e}", "err")
+                    self.log(f"خطا در ربات: {e}", "err")
                 ev.wait(iv * 60)
         threading.Thread(target=loop, daemon=True).start()
 
@@ -1629,7 +1355,7 @@ class SnappShopApp(App):
         self._save()
         self._set_bot_label(False)
         self._keep_awake(False)
-        self.log("ربات متوقف شد.")
+        self.log("ربات خاموش شد.")
 
     def export_history(self):
         if not os.path.exists(self.hist_path):
@@ -1646,17 +1372,10 @@ class SnappShopApp(App):
                     pass
         data = make_xlsx_multi([("تاریخچه ربات", cols, rows)])
         shown = self.write_report("reprice-history-" + time.strftime("%Y-%m-%d") + ".xlsx", data)
-        self.log(f"تاریخچه ({len(rows)} تغییر) ذخیره شد:\n{shown}", "ok")
+        self.log(f"تاریخچه‌ی {len(rows)} تغییر ذخیره شد:\n{shown}", "ok")
 
     def on_pause(self):
         return True
-
-
-def to_num_safe(v):
-    try:
-        return float(v) if v is not None else None
-    except Exception:
-        return None
 
 
 if __name__ == "__main__":
