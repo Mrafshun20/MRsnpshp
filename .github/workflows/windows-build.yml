@@ -20,29 +20,91 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Fix imports and Windows header (Base64 safe)
+    - name: Patch and verify files
+      shell: python
       run: |
-        python -c "import base64, pathlib, py_compile; h = base64.b64decode('IyAtKi0gY29kaW5nOiB1dGYtOCAtKi0KaW1wb3J0IGNzdiwgZGF0ZXRpbWUsIGpzb24sIGxvZ2dpbmcsIG50cGF0aCwgb3MsIHJlLCBzaHV0aWwsIHNpdGUsIHN5cywgdGhyZWFkaW5nLCB0aW1lCmZyb20gY29uY3VycmVudC5mdXR1cmVzIGltcG9ydCBUaHJlYWRQb29sRXhlY3V0b3IKZnJvbSBsb2dnaW5nLmhhbmRsZXJzIGltcG9ydCBSb3RhdGluZ0ZpbGVIYW5kbGVyCmZyb20gdHlwaW5nIGltcG9ydCBBbnksIERpY3QsIExpc3QsIE9wdGlvbmFsLCBUdXBsZSwgVW5pb24KaW1wb3J0IHJlcXVlc3RzCl9IRVJFMC = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))\nif sys.stdout is None: sys.stdout = open(os.devnull, 'w')\nif sys.stderr is None: sys.stderr = open(os.devnull, 'w')\nos.environ.setdefault('KIVY_NO_CONSOLELOG', '1')\nif os.name == 'nt':\n    if getattr(site, 'USER_BASE', None) is None: site.USER_BASE = _HERE0\n    if getattr(site, 'USER_SITE', None) is None: site.USER_SITE = _HERE0\n    _oj = ntpath.join\n    ntpath.join = os.path.join = lambda a, *q: _oj(a if a is not None else _HERE0, *[x for x in q if x is not None])\n    if hasattr(os, 'add_dll_directory'):\n        for _d in ('', 'share\\\\sdl2\\\\bin', 'share\\\\glew\\\\bin', 'share\\\\angle\\\\bin'):\n            _p = _oj(_HERE0, _d) if _d else _HERE0\n            if os.path.isdir(_p):\n                try: os.add_dll_directory(_p)\n                except Exception: pass\n'[:288]).decode('utf-8') + \"_HERE0 = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))\\nif sys.stdout is None: sys.stdout = open(os.devnull, 'w')\\nif sys.stderr is None: sys.stderr = open(os.devnull, 'w')\\nos.environ.setdefault('KIVY_NO_CONSOLELOG', '1')\\nif os.name == 'nt':\\n    if getattr(site, 'USER_BASE', None) is None: site.USER_BASE = _HERE0\\n    if getattr(site, 'USER_SITE', None) is None: site.USER_SITE = _HERE0\\n    _oj = ntpath.join\\n    ntpath.join = os.path.join = lambda a, *q: _oj(a if a is not None else _HERE0, *[x for x in q if x is not None])\\n    if hasattr(os, 'add_dll_directory'):\\n        for _d in ('', 'share/sdl2/bin', 'share/glew/bin', 'share/angle/bin'):\\n            _p = _oj(_HERE0, _d) if _d else _HERE0\\n            if os.path.isdir(_p):\\n                try: os.add_dll_directory(_p)\\n                except Exception: pass\\n\"; p = pathlib.Path('main.py'); m = p.read_text('utf-8'); i = m.find('from kivy.app import App'); m = (h + m[i:] if i != -1 else h + m).replace('from typing import Any, Dict, List\n', 'from typing import Any, Dict, List, Optional\n'); p.write_text(m, 'utf-8'); py_compile.compile('main.py', doraise=True); print('MAIN_OK')"
+        import os, sys, pathlib, py_compile
 
-    - name: Commit fixed main.py
+        p_main = pathlib.Path("main.py")
+        m = p_main.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+        header = "\n".join([
+            "# -*- coding: utf-8 -*-",
+            "import csv, datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time",
+            "from concurrent.futures import ThreadPoolExecutor",
+            "from logging.handlers import RotatingFileHandler",
+            "from typing import Any, Dict, List, Optional, Tuple, Union",
+            "import requests",
+            "_HERE0 = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))",
+            "if sys.stdout is None: sys.stdout = open(os.devnull, 'w')",
+            "if sys.stderr is None: sys.stderr = open(os.devnull, 'w')",
+            "os.environ.setdefault('KIVY_NO_CONSOLELOG', '1')",
+            "if os.name == 'nt':",
+            "    if getattr(site, 'USER_BASE', None) is None: site.USER_BASE = _HERE0",
+            "    if getattr(site, 'USER_SITE', None) is None: site.USER_SITE = _HERE0",
+            "    _oj = ntpath.join",
+            "    ntpath.join = os.path.join = lambda a, *q: _oj(a if a is not None else _HERE0, *[x for x in q if x is not None])",
+            "    if hasattr(os, 'add_dll_directory'):",
+            "        for _d in ('', 'share/sdl2/bin', 'share/glew/bin', 'share/angle/bin'):",
+            "            _p = _oj(_HERE0, _d) if _d else _HERE0",
+            "            if os.path.isdir(_p):",
+            "                try: os.add_dll_directory(_p)",
+            "                except Exception: pass",
+            ""
+        ])
+
+        idx = m.find("from kivy.app import App")
+        m = (header + m[idx:]) if idx != -1 else (header + m)
+        m = m.replace("from typing import Any, Dict, List\n", "from typing import Any, Dict, List, Optional\n")
+        m = m.replace(
+            "return TextInput(hint_text=hint,",
+            "has_fa = any(ord(c) > 1500 for c in str(hint))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign='right' if has_fa else 'left',",
+            1
+        )
+
+        p_main.write_text(m, encoding="utf-8")
+        py_compile.compile("main.py", doraise=True)
+        py_compile.compile("logic.py", doraise=True)
+        print("PATCH_AND_COMPILE_OK")
+
+    - name: Commit patched files
+      shell: bash
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git add main.py
-        git diff --staged --quiet || git commit -m "Fix Optional and logging imports in main.py"
+        git diff --staged --quiet || git commit -m "Auto-fix main.py imports and Windows header"
         git push || true
 
     - name: Install dependencies
+      shell: bash
       run: |
         python -m pip install --upgrade pip
         pip install kivy==2.3.0 kivy_deps.sdl2 kivy_deps.glew kivy_deps.angle requests urllib3 idna charset-normalizer certifi arabic-reshaper python-bidi==0.4.2 future pyinstaller
 
-    - name: Build EXE with PyInstaller
+    - name: Build EXE
+      shell: python
       env:
         KIVY_GL_BACKEND: angle_sdl2
         KIVY_NO_CONSOLELOG: 1
       run: |
-        python -c "import sys, os, PyInstaller.__main__, kivy_deps.sdl2, kivy_deps.glew, kivy_deps.angle; share = os.path.join(sys.prefix, 'share'); bins = [f'--add-binary={p};.' for p in (kivy_deps.sdl2.dep_bins + kivy_deps.glew.dep_bins + kivy_deps.angle.dep_bins) if os.path.isdir(p)]; PyInstaller.__main__.run(['--noconfirm', '--onefile', '--windowed', '--add-data=DejaVuSans.ttf;.', '--add-data=DejaVuSans-Bold.ttf;.', f'--add-data={share};share', *bins, '--hidden-import=logic', '--hidden-import=core', '--hidden-import=bot', '--hidden-import=kivy_deps.sdl2', '--hidden-import=kivy_deps.glew', '--hidden-import=kivy_deps.angle', 'main.py'])"
+        import sys, os, PyInstaller.__main__, kivy_deps.sdl2, kivy_deps.glew, kivy_deps.angle
+        share = os.path.join(sys.prefix, "share")
+        bins = [f"--add-binary={p};." for p in (kivy_deps.sdl2.dep_bins + kivy_deps.glew.dep_bins + kivy_deps.angle.dep_bins) if os.path.isdir(p)]
+        PyInstaller.__main__.run([
+            "--noconfirm", "--onefile", "--windowed",
+            "--add-data=DejaVuSans.ttf;.",
+            "--add-data=DejaVuSans-Bold.ttf;.",
+            f"--add-data={share};share",
+            *bins,
+            "--hidden-import=logic",
+            "--hidden-import=core",
+            "--hidden-import=bot",
+            "--hidden-import=kivy_deps.sdl2",
+            "--hidden-import=kivy_deps.glew",
+            "--hidden-import=kivy_deps.angle",
+            "main.py"
+        ])
 
     - name: Upload EXE
       uses: actions/upload-artifact@v4
