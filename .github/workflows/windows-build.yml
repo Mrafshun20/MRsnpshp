@@ -20,187 +20,32 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Restore clean logic.py and main.py
-      shell: bash
+    - name: Restore and patch logic.py and main.py
       run: |
-        python - << 'EOF'
-        import pathlib, re, textwrap
+        python -c "import pathlib, py_compile; l = pathlib.Path('logic_v3_unused.py').read_text(encoding='utf-8'); l = l.replace('BBK = [\"isbuybox\", \"hasbuybox\", \"buybox\",', 'BBK = [\"isbuybox\", \"hasbuybox\",').replace('COMPK = [\"lowestprice\",', 'COMPK = [\"buybox\", \"lowestprice\",'); l += '\n\ndef event_line(e):\n    return str(e.get(\"event_type\",\"EVENT\")) + \" | \" + str(e.get(\"order_number\",\"\"))\n'; pathlib.Path('logic.py').write_text(l, encoding='utf-8'); m = pathlib.Path('main_v3_unused.py').read_text(encoding='utf-8'); hdr = '# -*- coding: utf-8 -*-\nimport csv, datetime, json, ntpath, os, re, shutil, site, sys, threading, time\nHERE = getattr(sys, \"_MEIPASS\", os.path.dirname(os.path.abspath(__file__)))\nif getattr(site, \"USER_BASE\", None) is None: site.USER_BASE = HERE\nif getattr(site, \"USER_SITE\", None) is None: site.USER_SITE = HERE\n_orig_join = ntpath.join\ndef _safe_join(a, *p): return _orig_join(a if a is not None else HERE, *[x for x in p if x is not None])\nntpath.join = os.path.join = _safe_join\nif hasattr(os, \"add_dll_directory\"):\n    for _d in (\"\", \"share\\\\sdl2\\\\bin\", \"share\\\\glew\\\\bin\", \"share\\\\angle\\\\bin\"):\n        _p = _orig_join(HERE, _d) if _d else HERE\n        if os.path.isdir(_p):\n            try: os.add_dll_directory(_p)\n            except Exception: pass\nif sys.stdout is None: sys.stdout = open(os.devnull, \"w\")\nif sys.stderr is None: sys.stderr = open(os.devnull, \"w\")\nos.environ.setdefault(\"KIVY_NO_CONSOLELOG\", \"1\")\n'; m = hdr + m[m.find('from concurrent.futures'):]; m = m.replace('return TextInput(hint_text=hint,', 'has_fa = bool(re.search(\"[\\\\u0600-\\\\u06FF]\", str(hint)))\n    return TextInput(hint_text=fa(hint) if has_fa else str(hint), halign=\"right\" if has_fa else \"left\",'); pathlib.Path('main.py').write_text(m, encoding='utf-8'); py_compile.compile('logic.py', doraise=True); py_compile.compile('main.py', doraise=True); print('Both files patched and verified OK!')"
 
-        logic_code = '''# -*- coding: utf-8 -*-
-        import datetime, io, re, zipfile
-        from typing import Any, Dict, List, Optional
-        from xml.sax.saxutils import escape
+    - name: Commit repaired files back to repository
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add logic.py main.py
+        git diff --staged --quiet || git commit -m "Auto-repair logic.py and main.py"
+        git push || true
 
-        def norm(s) -> str:
-            return re.sub(r"[^a-z0-9]", "", str(s).lower())
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install kivy==2.3.0 kivy_deps.sdl2 kivy_deps.glew kivy_deps.angle requests urllib3 idna charset-normalizer certifi arabic-reshaper python-bidi==0.4.2 future pyinstaller
 
-        def to_num(v) -> Optional[float]:
-            if isinstance(v, bool) or v is None:
-                return None
-            if isinstance(v, (int, float)):
-                return float(v) if v == v and abs(v) != float("inf") else None
-            if isinstance(v, str):
-                t = re.sub(r"[,\\s\\u066c\\u060c]", "", v)
-                if not t:
-                    return None
-                try:
-                    return float(t)
-                except ValueError:
-                    return None
-            return None
+    - name: Build EXE with PyInstaller
+      env:
+        KIVY_GL_BACKEND: angle_sdl2
+        KIVY_NO_CONSOLELOG: 1
+      run: |
+        python -c "import sys, os, PyInstaller.__main__, kivy_deps.sdl2, kivy_deps.glew, kivy_deps.angle; share = os.path.join(sys.prefix, 'share'); bins = [f'--add-binary={p};.' for p in (kivy_deps.sdl2.dep_bins + kivy_deps.glew.dep_bins + kivy_deps.angle.dep_bins) if os.path.isdir(p)]; PyInstaller.__main__.run(['--noconfirm', '--onefile', '--windowed', '--add-data=DejaVuSans.ttf;.', '--add-data=DejaVuSans-Bold.ttf;.', f'--add-data={share};share', *bins, '--hidden-import=logic', '--hidden-import=kivy_deps.sdl2', '--hidden-import=kivy_deps.glew', '--hidden-import=kivy_deps.angle', 'main.py'])"
 
-        def flat(o, pre="", out=None, d=0):
-            if out is None:
-                out = []
-            if isinstance(o, dict) and d < 3:
-                for k, v in o.items():
-                    flat(v, f"{pre}.{k}" if pre else str(k), out, d + 1)
-            elif pre:
-                out.append((pre, o))
-            return out
-
-        def find(o, names, fl=None):
-            if fl is None:
-                fl = flat(o)
-            for name in names:
-                best = None
-                for path, val in fl:
-                    seg = path.split(".")
-                    if norm(seg[-1]) != name or val is None or isinstance(val, (dict, list)):
-                        continue
-                    if best is None or len(seg) < best[2]:
-                        best = (path, val, len(seg))
-                if best:
-                    return {"path": best[0], "value": best[1]}
-            return None
-
-        NAMEK = ["title", "name", "productname", "producttitle", "titlefa", "namefa"]
-        SKUK = ["sku", "vendorsku", "sellersku", "productcode", "code", "id", "inventoryproductid"]
-        PRICEK = ["price", "sellingprice", "saleprice", "finalprice", "currentprice"]
-        STOCKK = ["stock", "quantity", "inventory", "qty", "stockcount", "availablestock"]
-        ACTK = ["active", "isactive", "enabled", "isenabled", "status", "state", "visible", "isvisible"]
-        BBK = ["isbuybox", "hasbuybox", "buyboxwinner", "isbuyboxwinner", "winbuybox", "isbuyboxowner", "iswinner"]
-        RANKK = ["rank", "position", "buyboxrank", "sellerrank"]
-        COMPK = ["buybox", "buyboxprice", "lowestprice", "lowestcompetitorprice", "competitorprice", "bestprice",
-                 "firstprice", "lowestsellerprice", "buyboxwinnerprice", "topprice", "minimumcompetitorprice"]
-        INACT_RE = re.compile(r"inactive|deactiv|disabled?|draft|hidden|archiv|stopped|suspend|غیر\\s*فعال|غیرفعال|متوقف|مخفی", re.I)
-        BOOL_KEYS = {"active", "isactive", "enabled", "isenabled", "visible", "isvisible"}
-
-        class Prod:
-            def __init__(self, raw, idx=0):
-                self.raw = raw if isinstance(raw, dict) else {}
-                self.i = idx
-                self.sel = False
-                self.id = str(self.raw.get("id") or self.raw.get("inventory_product_id") or "").strip()
-                self.real_sku = str(self.raw.get("sku") or "").strip()
-                self.product_number = self.raw.get("product_number")
-                self.name = "(بدون نام)"
-                self.sku = self.real_sku or self.id or (str(self.product_number) if self.product_number else "")
-                self.key = self.sku or f"#{idx + 1}"
-                self.variation = ""
-                self.price = None
-                self.stock = None
-                self.comp = None
-                self.sp = None
-                self.sp_stock = None
-                self.sp_start = ""
-                self.sp_end = ""
-                self.ref_min = None
-                self.ref_max = None
-                self.active = None
-                self.bb = None
-                self.inactive = self.oos = self.lose = False
-                self.det = {}
-
-            @property
-            def has_sp(self) -> bool:
-                return self.sp is not None and self.sp > 0
-
-            @property
-            def eff_price(self) -> Optional[float]:
-                return self.sp if self.has_sp else self.price
-
-            def calc(self):
-                self.inactive = self.active is False
-                self.oos = self.stock is not None and self.stock <= 0
-                eff = self.eff_price
-                if self.comp is not None and eff is not None:
-                    if self.inactive or self.oos:
-                        self.bb = False
-                        self.lose = eff > self.comp
-                    else:
-                        self.bb = eff <= self.comp
-                        self.lose = eff > self.comp
-                else:
-                    self.lose = self.bb is False
-
-            def item(self, price=None, stock=None, **extra) -> Dict[str, Any]:
-                out = {}
-                if self.id:
-                    out["id"] = self.id
-                if self.real_sku:
-                    out["sku"] = self.real_sku
-                elif not self.id and self.sku:
-                    out["sku"] = self.sku
-                out["price"] = int(round(self.price if price is None else price))
-                out["stock"] = int(round(0 if (self.stock is None and stock is None) else (self.stock if stock is None else stock)))
-                out.update(extra)
-                return out
-
-            def reprice_item(self, target_price: int, stock=None) -> Dict[str, Any]:
-                target = int(round(target_price))
-                st_val = int(round(0 if (self.stock is None and stock is None) else (self.stock if stock is None else stock)))
-                base_p = int(round(self.price or target))
-                now = datetime.datetime.now()
-                s_date = (self.sp_start[:10] if self.sp_start else now.strftime("%Y-%m-%d"))
-                e_date = (self.sp_end[:10] if self.sp_end else (now + datetime.timedelta(days=30)).strftime("%Y-%m-%d"))
-                sp_stk = int(round(self.sp_stock if (self.sp_stock is not None and self.sp_stock > 0) else max(1, st_val)))
-                if (self.has_sp and target < base_p) or base_p > target:
-                    return self.item(price=base_p, stock=st_val, special_price=target,
-                                     special_price_start_at=s_date, special_price_end_at=e_date, special_price_stock=sp_stk)
-                return self.item(price=target, stock=st_val)
-
-            def apply_local_reprice(self, target_price: int):
-                target = float(int(round(target_price)))
-                if self.price and target < self.price:
-                    self.sp = target
-                else:
-                    self.price = target
-                    if self.has_sp and self.sp >= target:
-                        self.sp = None
-                self.calc()
-
-        def norm_prod(p, idx=0) -> Prod:
-            if not isinstance(p, dict):
-                return Prod({}, idx)
-            fl = flat(p)
-            g = lambda names: find(p, names, fl)
-            nm, sk, pr, st = g(NAMEK), g(SKUK), g(PRICEK), g(STOCKK)
-            ac, bb, rk, cp = g(ACTK), g(BBK), g(RANKK), g(COMPK)
-            o = Prod(p, idx)
-            if p.get("title"):
-                o.name = str(p["title"])
-            elif nm:
-                o.name = str(nm["value"])
-            vars_list = p.get("variation_attributes")
-            if isinstance(vars_list, list) and vars_list:
-                vparts = [str(va["value"]["title"]) for va in vars_list if isinstance(va, dict) and isinstance(va.get("value"), dict) and va["value"].get("title")]
-                if vparts:
-                    o.variation = " / ".join(vparts)
-            if not o.sku and sk:
-                o.sku = str(sk["value"])
-            o.key = o.sku or o.id or f"#{idx + 1}"
-            o.price = to_num(p.get("price")) if "price" in p else (to_num(pr["value"]) if pr else None)
-            o.stock = to_num(p.get("stock")) if "stock" in p else (to_num(st["value"]) if st else None)
-            disc = p.get("discount")
-            if isinstance(disc, dict):
-                o.sp = to_num(disc.get("special_price"))
-                o.sp_stock = to_num(disc.get("stock"))
-                o.sp_start = str(disc.get("start_at") or "")
-                o.sp_end = str(disc.get("end_at") or "")
-            ref = p.get("reference_price")
-            if isinstance(ref, dict):
-                o.ref_min = to_num(ref.get("lower_margin"))
-                o.ref_max = to_num(ref.get("upper_margin"))
-            raw_bb = p.get("buy_box")
-            if isinstance(raw_bb, (int, float)) and not isinstance(raw_bb
+    - name: Upload EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: SnappShop-Windows-App
+        path: dist/main.exe
