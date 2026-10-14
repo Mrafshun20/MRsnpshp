@@ -3,7 +3,7 @@ name: Build Windows App
 on:
   push:
     branches: [ main, master ]
-    paths-ignore: [ "buildozer.spec", ".github/workflows/build.yml", ".github/workflows/bot-windows.yml" ]
+    paths: [ "main.py", "logic.py", "core.py", "bot.py", "build_windows.py", ".github/workflows/windows-build.yml" ]
   workflow_dispatch:
 
 permissions:
@@ -16,31 +16,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade pip pyinstaller kivy==2.3.0 arabic-reshaper python-bidi==0.4.2 certifi pillow
-
-      - name: Compile check
-        run: python -m py_compile main.py logic.py core.py bot.py
-
-      - name: Build EXE
-        shell: bash
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name SnappShop \
-            --add-data "DejaVuSans.ttf;." --add-data "DejaVuSans-Bold.ttf;." --add-data "icon.png;." \
-            --collect-data certifi --hidden-import bot --hidden-import winsound main.py
+          python -m pip install --upgrade pip
+          pip install kivy==2.3.0 kivy_deps.sdl2 kivy_deps.glew kivy_deps.angle certifi arabic-reshaper python-bidi==0.4.2 future pyinstaller
 
-      - uses: actions/upload-artifact@v4
+      - name: Build EXE with PyInstaller
+        env:
+          KIVY_GL_BACKEND: angle_sdl2
+          KIVY_NO_CONSOLELOG: 1
+        run: python build_windows.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
         with:
-          name: SnappShop-exe
+          name: SnappShop-Windows-App
           path: dist/SnappShop.exe
 
       - name: Publish EXE to Releases (direct download)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-windows
-          name: Latest Windows build
+          tag_name: latest
+          name: Latest build
           files: dist/SnappShop.exe
