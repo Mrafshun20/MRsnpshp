@@ -33,15 +33,25 @@ jobs:
           tail -n 40 build.log
           test "$(cat code.txt)" = "0"
       - name: Rename APK
+        if: success()
         run: cp bin/*.apk SnappShop.apk
-      - uses: actions/upload-artifact@v4
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnappShop-APK
+          path: SnappShop.apk
+      - name: Upload build log
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log
-      - name: Publish APK to Releases (direct download, no zip)
+      - name: Publish APK to Releases
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Latest build
+          make_latest: true
           files: SnappShop.apk
