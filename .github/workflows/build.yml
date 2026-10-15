@@ -1,5 +1,8 @@
 name: Build APK
-on: [push, workflow_dispatch]
+on:
+  push:
+    paths-ignore: [ "build_windows.py", ".github/workflows/windows-build.yml", "README.txt" ]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
@@ -15,6 +18,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Compile check and unit tests
+        run: |
+          python -m py_compile main.py logic.py core.py bot.py
+          python -m unittest discover -s tests
       - name: Install deps
         run: |
           sudo apt-get update
@@ -34,8 +41,14 @@ jobs:
           test "$(cat code.txt)" = "0"
       - name: Rename APK
         run: cp bin/*.apk SnappShop.apk
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnappShop-APK
+          path: SnappShop.apk
+      - name: Upload build log (only if the build failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log

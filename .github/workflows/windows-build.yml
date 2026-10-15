@@ -26,6 +26,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install kivy==2.3.0 kivy_deps.sdl2 kivy_deps.glew kivy_deps.angle certifi arabic-reshaper python-bidi==0.4.2 future pyinstaller
 
+      - name: Compile check and unit tests
+        run: |
+          python -m py_compile main.py logic.py core.py bot.py build_windows.py
+          python -m unittest discover -s tests
+
       - name: Build EXE with PyInstaller
         env:
           KIVY_GL_BACKEND: angle_sdl2
