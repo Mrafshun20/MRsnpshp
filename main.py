@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import datetime, json, logging, ntpath, os, shutil, site, sys, threading, time
+import datetime, json, logging, ntpath, os, re, shutil, site, sys, threading, time
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List
 
@@ -28,22 +28,24 @@ if os.name == "nt":
                 except Exception:
                     pass
 
+from kivy.animation import Animation
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
-from kivy.core.text import LabelBase
+from kivy.core.text import Label as CoreLabel, LabelBase
 from kivy.core.window import Window
-from kivy.graphics import Color, RoundedRectangle
+from kivy.graphics import Color, Line, Rectangle, RoundedRectangle
+from kivy.graphics.texture import Texture
 from kivy.metrics import dp, sp
 from kivy.uix.behaviors import ButtonBehavior, ToggleButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.checkbox import CheckBox
-from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
 from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
 from kivy.utils import platform
 
 import arabic_reshaper
@@ -56,18 +58,27 @@ import core
 import logic as L
 
 # ---------------- theme ----------------
-BG = (0.055, 0.07, 0.11, 1)
-BAR = (0.09, 0.11, 0.17, 1)
-CARD = (0.105, 0.13, 0.20, 1)
-FIELD = (0.06, 0.08, 0.13, 1)
-CHIP = (0.15, 0.19, 0.29, 1)
-ACC = (0.23, 0.51, 0.96, 1)
-ACC2 = (0.20, 0.25, 0.36, 1)
-GRN = (0.30, 0.85, 0.50, 1)
-RED = (0.97, 0.40, 0.40, 1)
-AMB = (0.98, 0.75, 0.14, 1)
-TXT = (0.90, 0.92, 0.96, 1)
-MUT = (0.55, 0.60, 0.70, 1)
+BG = (0.047, 0.043, 0.094, 1)
+BAR = (0.078, 0.070, 0.145, 1)
+CARD = (0.108, 0.098, 0.192, 1)
+FIELD = (0.062, 0.057, 0.118, 1)
+CHIP = (0.165, 0.150, 0.275, 1)
+ACC = (0.80, 0.24, 0.82, 1)          # SnappShop magenta
+ACC_TXT = (0.94, 0.64, 0.96, 1)      # light magenta for titles / active tab
+GRN = (0.32, 0.86, 0.55, 1)
+RED = (1.00, 0.45, 0.48, 1)
+AMB = (1.00, 0.78, 0.25, 1)
+TXT = (0.93, 0.93, 0.97, 1)
+MUT = (0.62, 0.62, 0.76, 1)
+# button looks: (top colour, bottom colour, text colour)
+VARIANTS = {
+    "pri":  ((0.88, 0.34, 0.88, 1), (0.62, 0.18, 0.80, 1), (1, 1, 1, 1)),
+    "sec":  ((0.27, 0.25, 0.42, 1), (0.19, 0.18, 0.32, 1), (0.93, 0.93, 0.98, 1)),
+    "grn":  ((0.36, 0.84, 0.58, 1), (0.20, 0.64, 0.42, 1), (0.03, 0.14, 0.08, 1)),
+    "red":  ((0.97, 0.42, 0.45, 1), (0.78, 0.24, 0.30, 1), (1, 1, 1, 1)),
+    "blue": ((0.34, 0.58, 1.00, 1), (0.22, 0.42, 0.88, 1), (1, 1, 1, 1)),
+    "teal": ((0.25, 0.76, 0.70, 1), (0.14, 0.58, 0.54, 1), (0.02, 0.14, 0.13, 1)),
+}
 
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 LabelBase.register(name="fa",
@@ -77,26 +88,99 @@ FONT = FONT_B = "fa"
 Window.clearcolor = BG
 Window.softinput_mode = "below_target"
 
+_AR = re.compile("[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]")
+
 
 def fa(text) -> str:
+    """Logical text -> what Kivy must draw (letters joined, right-to-left runs reordered)."""
     return "\n".join(get_display(arabic_reshaper.reshape(l)) for l in str(text).split("\n"))
+
+
+def unfa(text) -> str:
+    """Inverse of fa(): selected on-screen text -> normal Persian, so Copy/Paste works."""
+    return "\n".join(L.unshape_line(l, get_display) for l in str(text).split("\n"))
 
 
 def n(x) -> str:
     return "—" if x is None else f"{int(round(x)):,}"
 
 
+# ---- text measuring / wrapping (a shaped string cannot be wrapped after shaping, so we wrap first)
+_MEAS: Dict[Any, Any] = {}
+
+
+def measure(logical, size=13) -> float:
+    cl = _MEAS.get(size)
+    if cl is None:
+        cl = _MEAS[size] = CoreLabel(font_name=FONT, font_size=sp(size))
+    try:
+        return cl.get_extents(fa(logical))[0]
+    except Exception:
+        return len(logical) * sp(size) * 0.6
+
+
+def _fit(word, max_w, size):
+    lo, hi = 1, len(word)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if measure(word[:mid], size) <= max_w:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def wrap_text(text, max_w, size=13) -> List[str]:
+    lines: List[str] = []
+    for para in str(text).split("\n"):
+        cur = ""
+        for word in para.split(" "):
+            cand = (cur + " " + word) if cur else word
+            if measure(cand, size) <= max_w:
+                cur = cand
+                continue
+            if cur:
+                lines.append(cur)
+                cur = ""
+            while len(word) > 1 and measure(word, size) > max_w:
+                k = _fit(word, max_w, size)
+                lines.append(word[:k])
+                word = word[k:]
+            cur = word
+        lines.append(cur)
+    return lines
+
+
 # ---------------- widgets ----------------
 class Bg(BoxLayout):
-    def __init__(self, color=CARD, radius=0, **kw):
+    """BoxLayout with a rounded background, optional hairline border and soft shadow."""
+    def __init__(self, color=CARD, radius=0, border=False, shadow=False, **kw):
         super().__init__(**kw)
+        self._rad = dp(radius)
         with self.canvas.before:
-            Color(*color)
-            self._r = RoundedRectangle(radius=[dp(radius)])
+            if shadow:
+                Color(0, 0, 0, 0.30)
+                self._bg_sh = RoundedRectangle(radius=[self._rad])
+            else:
+                self._bg_sh = None
+            self._bg_c = Color(*color)
+            self._bg_r = RoundedRectangle(radius=[self._rad])
+            if border and radius > 0:
+                Color(1, 1, 1, 0.07)
+                self._bg_b = Line(width=1)
+            else:
+                self._bg_b = None
         self.bind(pos=self._u, size=self._u)
+        self._u()
 
     def _u(self, *_):
-        self._r.pos, self._r.size = self.pos, self.size
+        x, y = self.pos
+        w, h = self.size
+        self._bg_r.pos, self._bg_r.size = (x, y), (w, h)
+        if self._bg_sh is not None:
+            self._bg_sh.pos, self._bg_sh.size = (x, y - dp(2)), (w, h)
+        if self._bg_b is not None:
+            self._bg_b.rounded_rectangle = (x, y, w, h, self._rad)
 
 
 class Tap(ButtonBehavior, BoxLayout):
@@ -115,64 +199,221 @@ def lab(text, color=TXT, size=14, bold=False, halign="right"):
     return l
 
 
+class StyledInput(TextInput):
+    """TextInput with a rounded field background and an accent border while focused."""
+    def __init__(self, **kw):
+        base = dict(font_name=FONT, font_size=sp(16), size_hint_y=None, height=dp(50), multiline=False,
+                    padding=[dp(14), dp(14), dp(14), dp(10)], background_normal="", background_active="",
+                    background_color=(0, 0, 0, 0), foreground_color=TXT, hint_text_color=MUT,
+                    cursor_color=ACC_TXT, selection_color=(ACC[0], ACC[1], ACC[2], 0.35), write_tab=False)
+        base.update(kw)
+        super().__init__(**base)
+        with self.canvas.before:
+            Color(*FIELD)
+            self._bgr = RoundedRectangle(radius=[dp(12)])
+            self._brc = Color(1, 1, 1, 0.10)
+            self._brl = Line(width=1)
+        self.bind(pos=self._ub, size=self._ub, focus=self._uf)
+        self._ub()
+
+    def _ub(self, *_):
+        x, y = self.pos
+        w, h = self.size
+        self._bgr.pos, self._bgr.size = (x, y), (w, h)
+        self._brl.rounded_rectangle = (x, y, w, h, dp(12))
+
+    def _uf(self, _i, f):
+        self._brc.rgba = (ACC[0], ACC[1], ACC[2], 0.9) if f else (1, 1, 1, 0.10)
+
+
+class FaInput(StyledInput):
+    """Single-line field for Persian/Arabic text.
+
+    Kivy's TextInput cannot join Persian letters or order right-to-left text, so the real (logical)
+    text stays in .text - search, IME and paste keep working - and a label on top draws the shaped
+    version. The caret is pinned to the end of the text (editing = type at the end / backspace /
+    the x button), which is what the search box needs."""
+    def __init__(self, hint="", text="", **kw):
+        self._fa_hint = hint
+        super().__init__(text=text, **kw)
+        self.foreground_color = (0, 0, 0, 0)       # hide the raw, unshaped glyphs
+        self.cursor_color = (0, 0, 0, 0)
+        self.selection_color = (0, 0, 0, 0)
+        for k, v in (("use_bubble", False), ("use_handles", False)):
+            try:
+                setattr(self, k, v)
+            except Exception:
+                pass
+        self._fa_ov = Label(font_name=FONT, font_size=sp(16), color=TXT, halign="right", valign="middle",
+                         max_lines=1, shorten=True)
+        self._fa_x = Label(text="✕", font_name=FONT_B, font_size=sp(15), color=MUT, size_hint=(None, None),
+                        size=(dp(34), dp(34)))
+        self.add_widget(self._fa_ov)
+        self.add_widget(self._fa_x)
+        with self.canvas.after:
+            self._fa_cc = Color(ACC_TXT[0], ACC_TXT[1], ACC_TXT[2], 0)
+            self._fa_cr = Rectangle(size=(dp(2), dp(22)))
+        self.bind(pos=self._lay, size=self._lay, text=self._lay, focus=self._focus)
+        self._lay()
+
+    def _lay(self, *_):
+        pad = dp(14)
+        txt = self.text
+        left = dp(36) if txt else 0
+        ov = self._fa_ov
+        ov.pos = (self.x + pad + left, self.y)
+        ov.size = (max(dp(10), self.width - 2 * pad - left), self.height)
+        ov.text_size = ov.size
+        rtl = (not txt) or bool(_AR.search(txt))
+        ov.halign = "right" if rtl else "left"
+        ov.shorten_from = "right" if rtl else "left"
+        ov.text = fa(txt if txt else self._fa_hint)
+        ov.color = TXT if txt else MUT
+        self._fa_x.opacity = 1 if txt else 0
+        self._fa_x.pos = (self.x + dp(4), self.center_y - dp(17))
+        ink = min(measure(txt, 16), ov.width) if txt else 0
+        cx = (ov.right - ink - dp(3)) if rtl else (ov.x + ink + dp(1))
+        self._fa_cr.pos = (cx, self.center_y - dp(11))
+
+    def _focus(self, _i, f):
+        Clock.unschedule(self._tick)
+        self._fa_cc.a = 1 if f else 0
+        if f:
+            Clock.schedule_interval(self._tick, 0.55)
+
+    def _tick(self, _dt):
+        self._fa_cc.a = 0 if self._fa_cc.a else 1
+
+    # --- keep the (invisible) caret at the end so typed text always appends
+    def _pin(self):
+        try:
+            self.cancel_selection()
+            self.cursor = self.get_cursor_from_index(len(self.text))
+        except Exception:
+            pass
+
+    def insert_text(self, substring, from_undo=False):
+        self._pin()
+        return super().insert_text(substring.replace("\n", " "), from_undo=from_undo)
+
+    def do_backspace(self, *a, **k):
+        self._pin()
+        return super().do_backspace(*a, **k)
+
+    def do_cursor_movement(self, *a, **k):
+        self._pin()
+
+    def on_touch_down(self, touch):
+        if self.text and self.collide_point(*touch.pos) and touch.x < self.x + dp(42):
+            self.text = ""
+            return True
+        r = super().on_touch_down(touch)
+        self._pin()
+        return r
+
+
 def inp(hint, text="", **kw):
-    return TextInput(hint_text=hint, text=text, multiline=False, font_name=FONT, font_size=sp(16),
-                     size_hint_y=None, height=dp(50), padding=[dp(14), dp(14), dp(14), dp(10)],
-                     background_normal="", background_active="", background_color=FIELD,
-                     foreground_color=TXT, hint_text_color=MUT, cursor_color=ACC,
-                     write_tab=False, **kw)
+    ti = StyledInput(hint_text=hint, text=text, **kw)
+    try:
+        ti.halign = "right"
+    except Exception:
+        pass
+    return ti
+
+
+_GRAD: Dict[Any, Any] = {}
+
+
+def grad_tex(top, bot):
+    """1x2 texture, stretched with linear filtering = vertical gradient (first row is the bottom)."""
+    k = (top, bot)
+    t = _GRAD.get(k)
+    if t is None:
+        t = Texture.create(size=(1, 2), colorfmt="rgba")
+        t.blit_buffer(bytes(int(max(0.0, min(1.0, c)) * 255) for c in (*bot, *top)), colorfmt="rgba", bufferfmt="ubyte")
+        t.mag_filter = "linear"
+        t.min_filter = "linear"
+        _GRAD[k] = t
+    return t
 
 
 class RBtn(ButtonBehavior, Label):
-    def __init__(self, text, color=ACC, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(16), color=(1, 1, 1, 1),
-                         size_hint_y=None, height=dp(50), **kw)
-        self._c = color
+    """Rounded gradient button with a soft shadow. kind: pri | sec | grn | red | blue | teal."""
+    def __init__(self, text, kind="pri", icon="", height=50, **kw):
+        top, bot, fg = VARIANTS.get(kind, VARIANTS["pri"])
+        self._h = dp(height)
+        self._icon = icon
+        super().__init__(text=fa(f"{icon}  {text}" if icon else text), font_name=FONT_B, font_size=sp(15),
+                         color=fg, size_hint_y=None, height=self._h, halign="center", valign="middle", **kw)
         with self.canvas.before:
-            self._col = Color(*color)
-            self._r = RoundedRectangle(radius=[dp(12)])
+            Color(0, 0, 0, 0.35)
+            self._sh = RoundedRectangle(radius=[dp(14)])
+            self._col = Color(1, 1, 1, 1)
+            self._r = RoundedRectangle(radius=[dp(14)], texture=grad_tex(top, bot))
         self.bind(pos=self._u, size=self._u)
+        self.bind(width=lambda i, w: setattr(i, "text_size", (max(0, w - dp(20)), None)))
+        self.bind(texture_size=lambda i, s: setattr(i, "height", max(i._h, s[1] + dp(22))))
+        self._u()
 
     def _u(self, *_):
-        self._r.pos, self._r.size = self.pos, self.size
+        x, y = self.pos
+        w, h = self.size
+        self._r.pos, self._r.size = (x, y), (w, h)
+        self._sh.pos, self._sh.size = (x, y - dp(2)), (w, h)
 
     def set_text(self, t):
-        self.text = fa(t)
+        self.text = fa(f"{self._icon}  {t}" if self._icon else t)
 
     def on_press(self):
-        self._col.rgba = tuple(c * 0.7 for c in self._c[:3]) + (1,)
+        self._col.rgba = (0.78, 0.78, 0.78, 1)
 
     def on_release(self):
-        self._col.rgba = self._c
+        self._col.rgba = (1, 1, 1, 1)
 
 
 class Chip(ButtonBehavior, Label):
     def __init__(self, text, key, active=False, **kw):
         super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(13),
-                         color=(1, 1, 1, 1) if active else MUT, size_hint=(None, None), height=dp(36), **kw)
+                         color=(1, 1, 1, 1) if active else MUT, size_hint=(None, None), height=dp(36),
+                         pos_hint={"center_y": 0.5}, **kw)
         self.key = key
         self.texture_update()
-        self.width = self.texture_size[0] + dp(28)
+        self.width = self.texture_size[0] + dp(30)
         with self.canvas.before:
             Color(*(ACC if active else CHIP))
             self._r = RoundedRectangle(radius=[dp(18)])
         self.bind(pos=self._u, size=self._u)
+        self._u()
 
     def _u(self, *_):
         self._r.pos, self._r.size = self.pos, self.size
 
 
 def chip_row():
-    sv = ScrollView(size_hint_y=None, height=dp(44), do_scroll_y=False, bar_width=0)
-    row = BoxLayout(orientation="horizontal", size_hint_x=None, spacing=dp(8))
-    row.bind(minimum_width=row.setter("width"))
+    """Horizontally scrolling chips, right-to-left: the first chip sits at the right edge."""
+    sv = ScrollView(size_hint_y=None, height=dp(46), do_scroll_y=False, bar_width=0)
+    row = BoxLayout(orientation="horizontal", size_hint_x=None, spacing=dp(8), padding=[dp(2), 0, dp(2), 0])
+
+    def fit(*_):
+        row.width = max(row.minimum_width, sv.width)
+    row.bind(minimum_width=fit)
+    sv.bind(width=fit)
     sv.add_widget(row)
     return sv, row
 
 
+def set_chips(sv, row, chips):
+    row.clear_widgets()
+    row.add_widget(Widget())                       # takes the free space so the chips hug the right edge
+    for c in reversed(chips):
+        row.add_widget(c)
+    Clock.schedule_once(lambda _dt: setattr(sv, "scroll_x", 1), 0)
+
+
 def badge(text, kind):
-    bg, fg = {"r": ((0.30, 0.11, 0.11, 1), RED), "g": ((0.07, 0.21, 0.12, 1), GRN),
-              "o": ((0.29, 0.21, 0.07, 1), AMB), "n": (CHIP, (0.62, 0.71, 0.88, 1))}[kind]
+    bg, fg = {"r": ((0.32, 0.12, 0.14, 1), RED), "g": ((0.07, 0.24, 0.14, 1), GRN),
+              "o": ((0.31, 0.23, 0.07, 1), AMB), "n": (CHIP, (0.72, 0.74, 0.92, 1)),
+              "p": ((0.30, 0.10, 0.32, 1), ACC_TXT)}[kind]
     l = Label(text=fa(text), font_name=FONT_B, font_size=sp(11), color=fg)
     l.texture_update()
     b = Bg(color=bg, radius=8, size_hint=(None, None), size=(l.texture_size[0] + dp(16), dp(22)))
@@ -187,18 +428,19 @@ def vbox():
 
 
 def card(title, *widgets):
-    c = Bg(color=CARD, radius=14, orientation="vertical", size_hint_y=None, padding=dp(14), spacing=dp(10))
+    c = Bg(color=CARD, radius=16, border=True, shadow=True, orientation="vertical", size_hint_y=None,
+           padding=dp(14), spacing=dp(10))
     c.bind(minimum_height=c.setter("height"))
     if title:
-        c.add_widget(lab(title, size=15, bold=True))
+        c.add_widget(lab(title, ACC_TXT, 15, bold=True))
     for w in widgets:
         c.add_widget(w)
     return c
 
 
 def page(*widgets):
-    sv = ScrollView(do_scroll_x=False)
-    box = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(12), size_hint_y=None)
+    sv = ScrollView(do_scroll_x=False, bar_width=dp(3))
+    box = BoxLayout(orientation="vertical", spacing=dp(14), padding=dp(12), size_hint_y=None)
     box.bind(minimum_height=box.setter("height"))
     for w in widgets:
         box.add_widget(w)
@@ -206,33 +448,59 @@ def page(*widgets):
     return sv
 
 
-class LogRow(BoxLayout):
-    def __init__(self, ts, text, kind, **kw):
-        super().__init__(orientation="horizontal", size_hint_y=None, spacing=dp(8), **kw)
-        import re
-        col = {"ok": GRN, "err": RED}.get(kind, TXT)
-        rtl = bool(re.search("[\u0600-\u06FF]", text))
-        t = Label(text=ts, font_name=FONT, font_size=sp(11), color=MUT, size_hint=(None, None),
-                  size=(dp(54), dp(18)), halign="left", valign="top")
-        t.bind(size=lambda i, s: setattr(i, "text_size", s))
-        m = Label(text=fa(text[:6000]), font_name=FONT, font_size=sp(13), color=col,
-                  halign="right" if rtl else "left", valign="top", size_hint_y=None)
-        m.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
-        m.bind(texture_size=lambda i, s: setattr(i, "height", s[1]))
-        m.bind(height=lambda i, h: setattr(self, "height", h + dp(6)))
-        self.add_widget(t)
-        self.add_widget(m)
+def hrow(*widgets, height=50, spacing=8):
+    """A horizontal row in right-to-left order: the first widget ends up at the right."""
+    r = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(height), spacing=dp(spacing))
+    for w in reversed(widgets):
+        r.add_widget(w)
+    return r
 
 
-class NavBtn(ToggleButtonBehavior, Label):
-    def __init__(self, text, name, app, **kw):
-        super().__init__(text=fa(text), font_name=FONT_B, font_size=sp(12), color=MUT,
-                         group="nav", allow_no_selection=False, **kw)
+class LogView(TextInput):
+    """Read-only log you can select from: long-press / drag, then Copy (bubble or Ctrl+C).
+    Lines are shaped and wrapped by us (see App._render_log); Copy turns them back into normal text."""
+    def __init__(self, **kw):
+        super().__init__(readonly=True, multiline=True, font_name=FONT, font_size=sp(13),
+                         background_normal="", background_active="", background_color=(0, 0, 0, 0),
+                         foreground_color=TXT, cursor_color=(0, 0, 0, 0),
+                         selection_color=(ACC[0], ACC[1], ACC[2], 0.40),
+                         padding=[dp(10), dp(10), dp(10), dp(10)], **kw)
+        for k, v in (("do_wrap", False), ("halign", "right")):
+            try:
+                setattr(self, k, v)
+            except Exception:
+                pass
+
+    def copy(self, data=""):
+        txt = data or self.selection_text
+        if txt:
+            Clipboard.copy(unfa(str(txt)))
+
+
+class NavBtn(ToggleButtonBehavior, BoxLayout):
+    def __init__(self, text, icon, name, app, **kw):
+        super().__init__(orientation="vertical", padding=[0, dp(7), 0, dp(3)], group="nav",
+                         allow_no_selection=False, **kw)
         self.name, self.app = name, app
+        self.ic = Label(text=icon, font_name=FONT_B, font_size=sp(19), color=MUT)
+        self.tx = Label(text=fa(text), font_name=FONT_B, font_size=sp(11), color=MUT, size_hint_y=None, height=dp(16))
+        self.add_widget(self.ic)
+        self.add_widget(self.tx)
+        with self.canvas.before:
+            self._pc = Color(ACC[0], ACC[1], ACC[2], 0)
+            self._pill = RoundedRectangle(radius=[dp(2)])
+        self.bind(pos=self._u, size=self._u)
+        self._u()
+
+    def _u(self, *_):
+        self._pill.pos = (self.x + self.width / 2 - dp(18), self.top - dp(3))
+        self._pill.size = (dp(36), dp(3))
 
     def on_state(self, _w, st):
-        self.color = ACC if st == "down" else MUT
-        if st == "down":
+        on = st == "down"
+        self.ic.color = self.tx.color = ACC_TXT if on else MUT
+        self._pc.a = 1 if on else 0
+        if on:
             self.app.sm.current = self.name
 
 
@@ -252,16 +520,20 @@ class GuiLogHandler(logging.Handler):
             msg = self.format(r)
             kind = "err" if r.levelno >= logging.WARNING else ("ok" if "NEW_ORDER" in msg else "info")
             self.app.log(msg, kind)
+            if "prices.csv applied" in msg or msg.startswith("Undo"):
+                self.app.ui(self.app.refresh_undo)
         except Exception:
             pass
 
 
 class ProdCard(Bg):
     def __init__(self, o, app, **kw):
-        super().__init__(color=CARD, radius=12, orientation="vertical", size_hint_y=None,
-                         padding=dp(10), spacing=dp(6), **kw)
+        super().__init__(color=CARD, radius=14, border=True, orientation="vertical", size_hint_y=None,
+                         padding=dp(12), spacing=dp(6), **kw)
         self.o, self.app = o, app
         self.bind(minimum_height=self.setter("height"))
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ds, bb = o.discount_state(now), o.buybox_state(now)
         top = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(10))
         top.bind(minimum_height=top.setter("height"))
         cb = CheckBox(size_hint=(None, None), size=(dp(34), dp(34)), active=o.sel)
@@ -269,24 +541,31 @@ class ProdCard(Bg):
         tap = Tap(orientation="vertical", size_hint_y=None)
         tap.bind(minimum_height=tap.setter("height"))
         tap.add_widget(lab(o.name, bold=True, size=14))
-        tap.add_widget(lab(o.key, MUT, 11))
+        tap.add_widget(lab(f"کد {o.key}" + (f"  ·  {o.variant}" if o.variant else ""), MUT, 11))
         tap.bind(on_release=lambda *_: app.edit_product(o))
+        top.add_widget(tap)                        # right-to-left: text first (left), check box at the right edge
         top.add_widget(cb)
-        top.add_widget(tap)
         self.add_widget(top)
         self.add_widget(lab(f"قیمت: {n(o.price)}     موجودی: {n(o.stock)}     انبار اسنپ: {n(o.wstock)}", size=13))
-        today = datetime.date.today().isoformat()
-        if o.has_discount(today):
-            self.add_widget(lab(f"قیمت با تخفیف: {n(o.sp)}  تا {o.sp_end[:10]}", MUT, 12))
+        if ds in ("active", "scheduled"):
+            pct = f" (٪{o.sp_pct:g})" if o.sp_pct else ""
+            when = (f"از {L.jdate(o.sp_start)} " if ds == "scheduled" and o.sp_start else "") + (f"تا {L.jdate(o.sp_end)}" if o.sp_end else "")
+            self.add_widget(lab(f"قیمت با تخفیف: {n(o.sp)}{pct}  {when}", ACC_TXT, 12))
+        if o.buy_box:
+            self.add_widget(lab(f"قیمت باکس (کمترین قیمت): {n(o.buy_box)}", GRN if bb == "win" else (AMB if bb == "lose" else MUT), 12))
         bs = []
         if o.active is False: bs.append(badge("غیرفعال", "r"))
+        if o.blacklist: bs.append(badge("لیست سیاه", "r"))
         if o.stock is not None and o.stock <= 0: bs.append(badge("ناموجود", "o"))
         elif o.stock is not None and o.stock <= app.low: bs.append(badge("کم‌موجودی", "o"))
-        if o.has_discount(today): bs.append(badge("تخفیف فعال", "g"))
+        if ds == "active": bs.append(badge("تخفیف فعال", "g"))
+        elif ds == "scheduled": bs.append(badge("تخفیف زمان‌بندی‌شده", "p"))
+        if bb == "win": bs.append(badge("برنده باکس", "g"))
+        elif bb == "lose": bs.append(badge("رقیب ارزان‌تر", "o"))
         if bs:
             row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(24), spacing=dp(6))
-            row.add_widget(BoxLayout())
-            for b in bs:
+            row.add_widget(Widget())
+            for b in reversed(bs):                 # first badge at the right edge
                 row.add_widget(b)
             self.add_widget(row)
 
@@ -300,6 +579,8 @@ class SnappShopApp(App):
     title = "SnappShop"
 
     def build(self):
+        self.log_entries: List[Dict[str, Any]] = []
+        self._log_trigger = Clock.create_trigger(self._render_log)
         self.client = None
         self.vendor_id = ""
         self.P: List[Any] = []
@@ -320,11 +601,14 @@ class SnappShopApp(App):
         self.bot = self._bot_mod() if self.desktop else None
         self.bot_obj = None
         self._bot_log_ready = False
+        # journal of changes (shared with the background bot on desktop) -> "Undo"
+        self.undo = L.UndoStore(os.path.join(self.out_dir() if self.desktop else self.data_dir, "undo.json"))
 
         root = BoxLayout(orientation="vertical")
-        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(56))
-        header.add_widget(lab("پنل اسنپ‌شاپ", size=18, bold=True, halign="center"))
+        header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(54))
+        header.add_widget(lab("پنل اسنپ‌شاپ", TXT, 18, bold=True, halign="center"))
         root.add_widget(header)
+        root.add_widget(Bg(color=ACC, size_hint_y=None, height=dp(2)))
         self.status = StatusBar(text="", font_name=FONT, font_size=sp(12), color=MUT,
                                 size_hint_y=None, height=dp(28), halign="center", shorten=True, shorten_from="right")
         self.status.bind(size=lambda i, s: setattr(i, "text_size", (s[0] - dp(16), None)))
@@ -336,9 +620,9 @@ class SnappShopApp(App):
         self.ent_ua = inp("User-Agent", self.cfg.get("ua", ""))
         self.ent_token = inp("Bearer Token", self.cfg.get("token", ""), password=True)
         self.ent_vid = inp("Vendor ID", self.cfg.get("vid", ""))
-        b = RBtn("تست اتصال و دریافت شناسه فروشگاه")
+        b = RBtn("تست اتصال و دریافت شناسه فروشگاه", "pri", "⚡")
         b.bind(on_release=lambda *_: self.test_connection())
-        b2 = RBtn("دریافت نمونه داده‌ها", ACC2)
+        b2 = RBtn("دریافت نمونه داده‌ها", "sec", "❐")
         b2.bind(on_release=lambda *_: self.dump_samples())
         self._add("conn", page(
             card("احراز هویت", lab("کد یکتا (User-Agent)", MUT, 12), self.ent_ua,
@@ -349,47 +633,51 @@ class SnappShopApp(App):
         # --- products
         self.pcount = lab("", MUT, 12, halign="center")
         self.pchips_sv, self.pchips = chip_row()
-        self.ent_q = inp("جستجو در نام یا کد")
+        self.ent_q = FaInput("جستجو در نام، کد یا رنگ")
         self.ent_q.bind(text=self._on_q)
         self.ent_low = inp("3", str(self.low), input_filter="int")
         self.ent_low.bind(text=self._on_low)
-        p1 = RBtn("بروزرسانی لیست")
+        p1 = RBtn("بروزرسانی لیست", "pri", "⟳")
         p1.bind(on_release=lambda *_: self.get_products())
-        p2 = RBtn("انتخاب همه", ACC2)
+        p2 = RBtn("انتخاب همه", "sec", "☑")
         p2.bind(on_release=lambda *_: self.sel_all(True))
-        p3 = RBtn("لغو انتخاب", ACC2)
+        p3 = RBtn("لغو انتخاب", "sec", "☐")
         p3.bind(on_release=lambda *_: self.sel_all(False))
-        brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
-        brow.add_widget(p2)
-        brow.add_widget(p3)
-        p4 = RBtn("ویرایش گروهی (قیمت و موجودی)", (0.20, 0.45, 0.85, 1))
+        brow = hrow(p2, p3)
+        p4 = RBtn("ویرایش گروهی (قیمت و موجودی)", "blue", "✎")
         p4.bind(on_release=lambda *_: self.bulk_edit())
-        p5 = RBtn("تخفیف گروهی با تاریخ شروع و پایان", (0.20, 0.55, 0.45, 1))
+        p5 = RBtn("تخفیف گروهی با تاریخ شروع و پایان", "teal", "★")
         p5.bind(on_release=lambda *_: self.discount_campaign())
+        self.undo_lbl = lab("", MUT, 12)
+        self.undo_btn = RBtn("بازگردانی آخرین تغییر", "red", "↶")
+        self.undo_btn.bind(on_release=lambda *_: self.undo_last())
+        hist_btn = RBtn("تاریخچه‌ی تغییرات", "sec", "▤", height=44)
+        hist_btn.bind(on_release=lambda *_: self.show_history())
         self.pl = vbox()
         self.pl.spacing = dp(10)
         self._add("prod", page(
             card("", p1, brow, p4, p5, self.pcount, self.ent_q,
                  lab("حد «کم‌موجودی» (تعداد)", MUT, 12), self.ent_low, self.pchips_sv),
+            card("بازگردانی (Undo)", self.undo_lbl, self.undo_btn, hist_btn),
             self.pl))
 
         # --- orders
-        self.ent_sd = inp("YYYY-MM-DD")
-        self.ent_ed = inp("YYYY-MM-DD")
+        self.ent_sd = inp("1405/07/20  یا  2026-10-12")
+        self.ent_ed = inp("1405/07/27  یا  2026-10-19")
         self.ent_ord = inp("Order Number", input_filter="int")
-        o1 = RBtn("نمایش لیست سفارشات")
+        o1 = RBtn("نمایش لیست سفارشات", "pri", "☰")
         o1.bind(on_release=lambda *_: self.load_orders())
-        o2 = RBtn("گزارش فروش (Excel)", (0.20, 0.65, 0.35, 1))
+        o2 = RBtn("گزارش فروش (Excel)", "grn", "⬇")
         o2.bind(on_release=lambda *_: self.export_sales())
-        o4 = RBtn("جزئیات سفارش")
+        o4 = RBtn("جزئیات سفارش", "pri")
         o4.bind(on_release=lambda *_: self.get_order())
         self.ochips_sv, self.ochips = chip_row()
         self.ol = vbox()
         self.ol.spacing = dp(10)
         self._add("ord", page(
             card("سفارشات و گزارش فروش",
-                 lab("از تاریخ (میلادی؛ خالی = ۱۴ روز اخیر)", MUT, 12), self.ent_sd,
-                 lab("تا تاریخ (میلادی)", MUT, 12), self.ent_ed, o1, o2),
+                 lab("از تاریخ (شمسی یا میلادی؛ خالی = ۱۴ روز اخیر)", MUT, 12), self.ent_sd,
+                 lab("تا تاریخ (شمسی یا میلادی)", MUT, 12), self.ent_ed, o1, o2),
             self.ochips_sv, self.ol,
             card("جزئیات یک سفارش", lab("شماره سفارش", MUT, 12), self.ent_ord, o4)))
 
@@ -398,10 +686,9 @@ class SnappShopApp(App):
             self.ent_wi = inp("Seconds", str(self.cfg.get("watch_sec", 60)), input_filter="int")
             self.watch_lbl = lab("وضعیت: خاموش", MUT, 14, bold=True)
             self.watch_last = lab("", MUT, 12)
-            w1 = RBtn("روشن کردن هشدار سفارش جدید", (0.30, 0.85, 0.50, 1))
-            w1.color = (0.04, 0.12, 0.07, 1)
+            w1 = RBtn("روشن کردن هشدار سفارش جدید", "grn", "▶")
             w1.bind(on_release=lambda *_: self.start_watch())
-            w2 = RBtn("خاموش کردن", (0.80, 0.26, 0.26, 1))
+            w2 = RBtn("خاموش کردن", "red", "■")
             w2.bind(on_release=lambda *_: self.stop_watch())
             self._add("auto", page(card(
                 "هشدار سفارش جدید", lab("هر چند ثانیه بررسی شود", MUT, 12), self.ent_wi,
@@ -410,58 +697,62 @@ class SnappShopApp(App):
         else:
             self.ent_wi = inp("Seconds", "60")
             self.bot_lbl = lab("وضعیت ربات: خاموش", MUT, 14, bold=True)
-            bb1 = RBtn("روشن کردن ربات", (0.30, 0.85, 0.50, 1))
-            bb1.color = (0.04, 0.12, 0.07, 1)
+            bb1 = RBtn("روشن کردن ربات", "grn", "▶")
             bb1.bind(on_release=lambda *_: self.start_bot())
-            bb2 = RBtn("خاموش کردن ربات", (0.80, 0.26, 0.26, 1))
+            bb2 = RBtn("خاموش کردن ربات", "red", "■")
             bb2.bind(on_release=lambda *_: self.stop_bot())
-            self.dry_btn = RBtn("", ACC2)
+            self.dry_btn = RBtn("", "sec")
             self._dry_text()
             self.dry_btn.bind(on_release=lambda *_: self.toggle_dry())
-            bb3 = RBtn("ساخت فایل قیمت‌ها (prices_export.csv)", ACC2)
+            bb3 = RBtn("ساخت فایل قیمت‌ها (prices_export.csv)", "sec", "⬇")
             bb3.bind(on_release=lambda *_: self.bot_export())
-            bb4 = RBtn("گزارش فروش همین حالا", ACC2)
+            bb4 = RBtn("گزارش فروش همین حالا", "sec", "☰")
             bb4.bind(on_release=lambda *_: self.bot_report())
-            bb5 = RBtn("باز کردن پوشه‌ی فایل‌ها", ACC2)
+            bb5 = RBtn("باز کردن پوشه‌ی فایل‌ها", "sec", "▤")
             bb5.bind(on_release=lambda *_: self.open_folder())
             cards_auto = [
                 card("ربات پس‌زمینه", self.bot_lbl, bb1, bb2,
                      lab("تا وقتی ربات روشن است: سفارش جدید و لغو را با صدا اعلام می‌کند، تغییرات فایل prices.csv را (قیمت، موجودی، تخفیف) روی اسنپ‌شاپ اعمال می‌کند و هر شب گزارش Excel می‌سازد. برنامه را Minimize کنید، نه Close.", MUT, 11)),
                 card("قیمت از روی فایل (Excel)", self.dry_btn, bb3,
-                     lab("۱) «ساخت فایل قیمت‌ها» را بزنید. ۲) فایل prices_export.csv را با نام prices.csv کپی کنید. ۳) ستون‌های price و stock و special_price را در Excel ویرایش و ذخیره کنید. ۴) اول در حالت آزمایشی نتیجه را در گزارش ببینید، بعد حالت آزمایشی را خاموش کنید. تغییر قیمت بیش از ۵۰٪ برای جلوگیری از اشتباه تایپی رد می‌شود.", MUT, 11)),
+                     lab("۱) «ساخت فایل قیمت‌ها» را بزنید. ۲) فایل prices_export.csv را با نام prices.csv کپی کنید. ۳) ستون‌های price و stock و special_price را در Excel ویرایش و ذخیره کنید. ۴) اول در حالت آزمایشی نتیجه را در گزارش ببینید، بعد حالت آزمایشی را خاموش کنید. تغییر قیمت بیش از ۵۰٪ برای جلوگیری از اشتباه تایپی رد می‌شود. هر تغییر واقعی در صفحه‌ی «محصولات ← بازگردانی» قابل برگشت است.", MUT, 11)),
                 card("فایل‌ها", bb4, bb5)]
             if os.name == "nt":
-                self.win_btn = RBtn("", ACC2)
+                self.win_btn = RBtn("", "sec")
                 self._win_text()
                 self.win_btn.bind(on_release=lambda *_: self.toggle_winstart())
                 cards_auto.append(card("ویندوز", self.win_btn,
                                        lab("با روشن شدن ویندوز، برنامه Minimize باز می‌شود و ربات (اگر روشن بوده) خودش ادامه می‌دهد. تا ربات روشن است ویندوز به حالت خواب نمی‌رود.", MUT, 11)))
             self._add("auto", page(*cards_auto))
 
-        # --- log
-        self.log_box = GridLayout(cols=1, size_hint_y=None, spacing=dp(4), padding=dp(12))
-        self.log_box.bind(minimum_height=self.log_box.setter("height"))
-        self.log_sv = ScrollView(do_scroll_x=False)
-        self.log_sv.add_widget(self.log_box)
-        clr = RBtn("پاک کردن گزارش", ACC2)
-        clr.height = dp(42)
-        clr.bind(on_release=lambda *_: self.log_box.clear_widgets())
-        lp = BoxLayout(orientation="vertical", padding=[dp(12), dp(8), dp(12), 0], spacing=dp(6))
-        lp.add_widget(clr)
-        lp.add_widget(self.log_sv)
+        # --- log (selectable / copyable)
+        self.log_view = LogView()
+        self.log_view.bind(width=lambda *_: self._log_trigger())
+        clr = RBtn("پاک کردن", "sec", "✖", height=42)
+        clr.bind(on_release=lambda *_: self.clear_log())
+        cpy = RBtn("کپی همه", "pri", "❐", height=42)
+        cpy.bind(on_release=lambda *_: self.copy_log())
+        logbox = Bg(color=CARD, radius=14, border=True, padding=dp(2))
+        logbox.add_widget(self.log_view)
+        lp = BoxLayout(orientation="vertical", padding=[dp(12), dp(8), dp(12), dp(8)], spacing=dp(8))
+        lp.add_widget(hrow(cpy, clr, height=42))
+        lp.add_widget(lab("جدیدترین پیام بالاست. برای انتخاب بخشی از متن، روی آن نگه دارید و بکشید، بعد «Copy» را بزنید.", MUT, 11))
+        lp.add_widget(logbox)
         self._add("log", lp)
 
         root.add_widget(self.sm)
-        nav = Bg(color=BAR, size_hint_y=None, height=dp(56))
+        nav = Bg(color=BAR, size_hint_y=None, height=dp(60))
         self.navs = []
-        for text, name in (("اتصال", "conn"), ("محصولات", "prod"), ("سفارشات", "ord"), ("هشدار" if not self.desktop else "ربات", "auto"), ("گزارش", "log")):
-            nb = NavBtn(text, name, self)
-            self.navs.append(nb)
+        tabs = (("اتصال", "⚡", "conn"), ("محصولات", "▦", "prod"), ("سفارشات", "☰", "ord"),
+                ("ربات" if self.desktop else "هشدار", "⚙", "auto"), ("گزارش", "▤", "log"))
+        for text, icon, name in tabs:
+            self.navs.append(NavBtn(text, icon, name, self))
+        for nb in reversed(self.navs):             # right-to-left: the first tab sits at the right edge
             nav.add_widget(nb)
         root.add_widget(nav)
         self.navs[0].state = "down"
         self.render_products()
         self.render_orders()
+        self.refresh_undo()
         self.log("آماده است.")
         if self.desktop and self.cfg.get("bot_on") and self.cfg.get("ua") and self.cfg.get("token") and self.cfg.get("vid"):
             Clock.schedule_once(lambda dt: self.start_bot(), 2)
@@ -498,14 +789,64 @@ class SnappShopApp(App):
                 self.log(f"خطا: {e}", "err")
         threading.Thread(target=w, daemon=True).start()
 
+    # ---- log
     def log(self, text, kind="info"):
+        text = str(text)[:6000]
+        e = {"ts": time.strftime("%H:%M:%S"), "kind": kind, "text": text, "w": None, "lines": []}
+
         def _do(_dt):
-            self.log_box.add_widget(LogRow(time.strftime("%H:%M"), text, kind))
-            if len(self.log_box.children) > 150:
-                self.log_box.remove_widget(self.log_box.children[-1])
+            self.log_entries.append(e)
+            if len(self.log_entries) > 300:
+                del self.log_entries[:len(self.log_entries) - 300]
             self.status.text = fa(text.split("\n")[0][:90])
             self.status.color = {"ok": GRN, "err": RED}.get(kind, MUT)
-            Clock.schedule_once(lambda _: setattr(self.log_sv, "scroll_y", 0), 0.1)
+            self._log_trigger()
+        Clock.schedule_once(_do, 0)
+
+    def _render_log(self, *_):
+        lv = self.log_view
+        avail = lv.width - lv.padding[0] - lv.padding[2] - dp(12)
+        if avail < dp(60):
+            return                                  # not laid out yet; the width binding re-triggers us
+        sym = {"ok": "✔", "err": "✖"}
+        blocks = []
+        for e in reversed(self.log_entries):        # newest first, so the latest line is always in view
+            if e["w"] != avail:
+                e["lines"] = wrap_text(f"{sym.get(e['kind'], '•')} {e['ts']}  {e['text']}", avail)
+                e["w"] = avail
+            blocks.append("\n".join(fa(l) for l in e["lines"]))
+        at_top = lv.scroll_y <= dp(8)
+        lv.text = "\n\n".join(blocks)
+        if at_top:
+            lv.scroll_y = 0
+
+    def copy_log(self):
+        if not self.log_entries:
+            self.toast("گزارشی برای کپی نیست.")
+            return
+        Clipboard.copy("\n".join(f"{e['ts']} {e['text']}" for e in self.log_entries))
+        self.toast("کل گزارش کپی شد.")
+
+    def clear_log(self):
+        self.log_entries.clear()
+        self._log_trigger()
+
+    def toast(self, text):
+        def _do(_dt):
+            l = Label(text=fa(text), font_name=FONT_B, font_size=sp(13), color=TXT)
+            l.texture_update()
+            w = min(Window.width - dp(32), l.texture_size[0] + dp(40))
+            b = Bg(color=(0.17, 0.15, 0.29, 0.98), radius=14, border=True, size_hint=(None, None),
+                   size=(w, dp(44)), pos=((Window.width - w) / 2, dp(84)), opacity=0)
+            b.add_widget(l)
+            Window.add_widget(b)
+            Animation(opacity=1, duration=0.15).start(b)
+
+            def _rm(_d):
+                a = Animation(opacity=0, duration=0.3)
+                a.bind(on_complete=lambda *_: Window.remove_widget(b))
+                a.start(b)
+            Clock.schedule_once(_rm, 1.9)
         Clock.schedule_once(_do, 0)
 
     def progress(self, text):
@@ -514,25 +855,23 @@ class SnappShopApp(App):
     def modal(self, title, sub, body, buttons, h=0.86):
         mv = ModalView(size_hint=(0.94, h), auto_dismiss=True, background="", background_color=(0, 0, 0, 0),
                        overlay_color=(0, 0, 0, 0.65))
-        box = Bg(color=CARD, radius=16, orientation="vertical", padding=dp(14), spacing=dp(10))
-        box.add_widget(lab(title, size=16, bold=True))
+        box = Bg(color=CARD, radius=18, border=True, orientation="vertical", padding=dp(14), spacing=dp(10))
+        box.add_widget(lab(title, ACC_TXT, 16, bold=True))
         if sub:
             box.add_widget(lab(sub, MUT, 12))
-        sv = ScrollView(do_scroll_x=False)
+        sv = ScrollView(do_scroll_x=False, bar_width=dp(3))
         sv.add_widget(body)
         box.add_widget(sv)
-        row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
         btns = []
-        for text, color, cb in buttons:
-            bt = RBtn(text, color)
+        for text, kind, cb in buttons:
+            bt = RBtn(text, kind)
             def _rel(_b, cb=cb):
                 r = cb() if cb else None
                 if r is not False:
                     mv.dismiss()
             bt.bind(on_release=_rel)
-            row.add_widget(bt)
             btns.append(bt)
-        box.add_widget(row)
+        box.add_widget(hrow(*btns))                 # first button at the right edge
         mv.add_widget(box)
         mv.open()
         return mv, btns
@@ -598,10 +937,10 @@ class SnappShopApp(App):
     def vis(self):
         today = datetime.date.today().isoformat()
         q = self.Q
-        return [o for o in self.P if L.match(o, self.PF, self.low, today) and (not q or q in (o.name + " " + o.key).lower())]
+        return [o for o in self.P if L.match(o, self.PF, self.low, today) and (not q or L.match_query(o, q))]
 
     def _on_q(self, _i, val):
-        self.Q = val.strip().lower()
+        self.Q = val.strip()
         Clock.unschedule(self._q_apply)
         Clock.schedule_once(self._q_apply, 0.35)
 
@@ -621,13 +960,14 @@ class SnappShopApp(App):
         self.render_products()
 
     def render_pchips(self):
-        self.pchips.clear_widgets()
         today = datetime.date.today().isoformat()
+        chips = []
         for key, label in L.FILTERS:
             cnt = sum(1 for o in self.P if L.match(o, key, self.low, today))
             ch = Chip(f"{label}  {n(cnt)}", key, active=(self.PF == key))
             ch.bind(on_release=lambda c: self.set_pf(c.key))
-            self.pchips.add_widget(ch)
+            chips.append(ch)
+        set_chips(self.pchips_sv, self.pchips, chips)
 
     def render_products(self):
         self.render_pchips()
@@ -636,7 +976,7 @@ class SnappShopApp(App):
         for o in Lst[:self.shown]:
             self.pl.add_widget(ProdCard(o, self))
         if len(Lst) > self.shown:
-            more = RBtn(f"نمایش بیشتر ({n(len(Lst) - self.shown)})", ACC2)
+            more = RBtn(f"نمایش بیشتر ({n(len(Lst) - self.shown)})", "sec")
             more.bind(on_release=lambda *_: self._more())
             self.pl.add_widget(more)
         if not Lst:
@@ -670,17 +1010,28 @@ class SnappShopApp(App):
         self.log("در حال دریافت محصولات...")
         self._run(f)
 
-    def patch(self, items, then):
-        """Send items; log failures; call then(bad_keys) on the UI thread."""
+    def patch(self, items, then, label="", targets=None):
+        """Send items; log failures; remember how things were (for Undo); call then(bad_keys) on the UI thread.
+        `targets` = the Prod objects behind `items` (same order), captured now = the 'before' state."""
+        snaps = [L.snap(o) for o in targets] if targets else []
         def f():
             res = self.client.patch_products(self.vendor_id, items)
-            ok, bad = L.summarize_patch(res)
+            out = L.patch_outcome(items, res)
+            bad = [(L.item_key(it), m) for it, (ok, m) in zip(items, out) if not ok]
+            good = [(s, it) for s, it, (ok, _m) in zip(snaps, items, out) if ok]
+            if good:
+                try:
+                    self.undo.push(L.make_undo_entry(label or "تغییر", good))
+                except Exception as e:
+                    self.log(f"ذخیره‌ی سابقه‌ی بازگردانی ناموفق بود: {e}", "err")
             def done():
+                okn = len(items) - len(bad)
                 if bad:
-                    self.log(f"{ok} مورد انجام شد، {len(bad)} مورد ناموفق:\n" + "\n".join(f"{k}: {m}" for k, m in bad[:8]), "err")
+                    self.log(f"{okn} مورد انجام شد، {len(bad)} مورد ناموفق:\n" + "\n".join(f"{k}: {m}" for k, m in bad[:8]), "err")
                 else:
-                    self.log(f"{ok} مورد با موفقیت به‌روزرسانی شد.", "ok")
+                    self.log(f"{okn} مورد با موفقیت به‌روزرسانی شد. (برگشت: صفحه‌ی محصولات ← بازگردانی)", "ok")
                 then({k for k, _ in bad})
+                self.refresh_undo()
             self.ui(done)
         self._run(f)
 
@@ -688,7 +1039,12 @@ class SnappShopApp(App):
         ep = inp("Price", "" if o.price is None else str(int(o.price)), input_filter="int")
         es = inp("Stock", "" if o.stock is None else str(int(o.stock)), input_filter="int")
         body = vbox()
-        for w in (lab("قیمت پایه (تومان)", MUT, 12), ep, lab("موجودی", MUT, 12), es):
+        info = []
+        if o.variant:
+            info.append(lab(o.variant, MUT, 12))
+        if o.buy_box:
+            info.append(lab(f"قیمت باکس (کمترین قیمت): {n(o.buy_box)}", MUT, 12))
+        for w in (*info, lab("قیمت پایه (تومان)", MUT, 12), ep, lab("موجودی", MUT, 12), es):
             body.add_widget(w)
         def save():
             if not self._need_vid():
@@ -704,8 +1060,8 @@ class SnappShopApp(App):
                 if o.key not in bad:
                     o.price, o.stock = item["price"], item["stock"]
                 self.render_products()
-            self.patch([item], then)
-        self.modal(o.name, o.key, body, [("انصراف", ACC2, None), ("ذخیره", ACC, save)], h=0.6)
+            self.patch([item], then, f"ویرایش «{o.name[:40]}»", [o])
+        self.modal(o.name, o.key, body, [("انصراف", "sec", None), ("ذخیره", "pri", save)], h=0.62)
 
     def bulk_edit(self):
         sel = [o for o in self.P if o.sel]
@@ -745,9 +1101,9 @@ class SnappShopApp(App):
                 for o in sel:
                     o.sel = False
                 self.render_products()
-            self.patch(items, then)
+            self.patch(items, then, f"ویرایش گروهی ({len(changes)} کالا)", [o for o, _p, _s in changes])
         self.modal("ویرایش گروهی", f"{n(len(sel))} کالا انتخاب شده است. فقط فیلدهای پرشده اعمال می‌شود.", body,
-                   [("انصراف", ACC2, None), ("اعمال", ACC, apply)], h=0.7)
+                   [("انصراف", "sec", None), ("اعمال", "pri", apply)], h=0.7)
 
     def discount_campaign(self):
         sel = [o for o in self.P if o.sel]
@@ -758,20 +1114,20 @@ class SnappShopApp(App):
             return
         today = datetime.date.today()
         e_pct = inp("مثلاً 10", "", input_filter="int")
-        e_st = inp("YYYY-MM-DD", today.isoformat())
-        e_en = inp("YYYY-MM-DD", (today + datetime.timedelta(days=7)).isoformat())
+        e_st = inp("1405/07/25  یا  2026-10-17", L.jdate(today.isoformat()))
+        e_en = inp("1405/08/02  یا  2026-10-24", L.jdate((today + datetime.timedelta(days=7)).isoformat()))
         e_ds = inp("خالی = موجودی کالا", "", input_filter="int")
         body = vbox()
-        for w in (lab("درصد تخفیف", MUT, 12), e_pct, lab("تاریخ شروع (میلادی)", MUT, 12), e_st,
-                  lab("تاریخ پایان (میلادی)", MUT, 12), e_en, lab("موجودی مخصوص تخفیف (اختیاری)", MUT, 12), e_ds):
+        for w in (lab("درصد تخفیف", MUT, 12), e_pct, lab("تاریخ شروع (شمسی یا میلادی)", MUT, 12), e_st,
+                  lab("تاریخ پایان (شمسی یا میلادی)", MUT, 12), e_en, lab("موجودی مخصوص تخفیف (اختیاری)", MUT, 12), e_ds):
             body.add_widget(w)
         def apply():
             pct = self._fnum(e_pct.text)
             try:
-                st = datetime.date.fromisoformat(e_st.text.strip())
-                en = datetime.date.fromisoformat(e_en.text.strip())
+                st = L.parse_date(e_st.text)
+                en = L.parse_date(e_en.text)
             except Exception:
-                self.log("تاریخ‌ها باید به شکل YYYY-MM-DD باشند.", "err")
+                self.log("تاریخ‌ها نامعتبر است. نمونه: 1405/07/25 یا 2026-10-17", "err")
                 return False
             if pct is None or not (1 <= pct <= 90):
                 self.log("درصد تخفیف باید بین ۱ و ۹۰ باشد.", "err")
@@ -785,26 +1141,120 @@ class SnappShopApp(App):
                 self.log("کالایی برای تخفیف پیدا نشد.", "err")
                 return
             self.go("log")
-            self.log(f"در حال ثبت تخفیف {pct:g}٪ روی {len(plan)} کالا...")
+            self.log(f"در حال ثبت تخفیف {pct:g}٪ روی {len(plan)} کالا (از {L.jdate(st.isoformat())} تا {L.jdate(en.isoformat())})...")
             def then(bad):
                 for o, it in plan:
                     if o.key not in bad:
                         o.sp, o.sp_start, o.sp_end = it["special_price"], st.isoformat(), en.isoformat()
+                        o.sp_stock, o.sp_pct = it["special_price_stock"], pct
                 for o in sel:
                     o.sel = False
                 self.render_products()
-            self.patch([it for _o, it in plan], then)
+            self.patch([it for _o, it in plan], then, f"تخفیف {pct:g}٪ ({len(plan)} کالا)", [o for o, _it in plan])
         self.modal("تخفیف گروهی", f"{n(len(sel))} کالا انتخاب شده است. قیمت پس از تخفیف از روی قیمت پایه محاسبه می‌شود.", body,
-                   [("انصراف", ACC2, None), ("ثبت تخفیف", ACC, apply)], h=0.8)
+                   [("انصراف", "sec", None), ("ثبت تخفیف", "pri", apply)], h=0.8)
+
+    # ---- undo
+    def refresh_undo(self):
+        e = self.undo.last()
+        if e:
+            self.undo_lbl.text = fa(f"آخرین تغییر: {e.get('label') or 'تغییر'}\n{L.jdate(e['ts'])} {e['ts'][11:16]} · {n(e.get('n'))} کالا")
+            self.undo_lbl.color = TXT
+        else:
+            self.undo_lbl.text = fa("تغییری برای بازگردانی وجود ندارد. هر ویرایش قیمت، موجودی یا تخفیف که از این برنامه بزنید اینجا ثبت می‌شود.")
+            self.undo_lbl.color = MUT
+        self.undo_btn.disabled = not e
+        self.undo_btn.opacity = 1 if e else 0.4
+
+    def undo_last(self):
+        e = self.undo.last()
+        if not e:
+            self.toast("تغییری برای بازگردانی نیست.")
+            return
+        if not self._need_vid():
+            return
+        _items, removals, _skipped = L.revert_items(e)
+        body = vbox()
+        body.spacing = dp(6)
+        for it in e["items"][:8]:
+            body.add_widget(lab(L.describe_change(it), TXT, 12))
+        if len(e["items"]) > 8:
+            body.add_widget(lab(f"و {n(len(e['items']) - 8)} کالای دیگر…", MUT, 11))
+        if removals:
+            body.add_widget(lab(f"توجه: برای {n(removals)} کالا تخفیف تازه‌ثبت‌شده باید برداشته شود. API اسنپ‌شاپ حذف تخفیف را مستند نکرده؛ تاریخ پایان تخفیف به دیروز تغییر داده می‌شود. اگر نپذیرفت، تخفیف را از پنل فروشندگان بردارید.", AMB, 11))
+        self.modal("بازگردانی آخرین تغییر",
+                   f"«{e.get('label') or 'تغییر'}» — {n(len(e['items']))} کالا به مقدار قبلی برمی‌گردد. مقدارهای فعلی روی اسنپ‌شاپ جایگزین می‌شوند.",
+                   body, [("انصراف", "sec", None), ("بازگردانی", "red", self._do_undo)], h=0.8)
+
+    def _do_undo(self):
+        client, vid = self.client, self.vendor_id
+        self.go("log")
+        self.log("در حال بازگردانی آخرین تغییر...")
+        def f():
+            r = L.run_undo(client, vid, self.undo)
+            def done():
+                if r is None:
+                    self.log("تغییری برای بازگردانی نبود.", "err")
+                    self.refresh_undo()
+                    return
+                by_key = {p.key: p for p in self.P}
+                for x in r["restored"]:
+                    p = by_key.get(x.get("sku") or x.get("id"))
+                    b = x["before"]
+                    if p is not None:
+                        p.price, p.stock = b.get("price"), b.get("stock")
+                        p.sp, p.sp_start, p.sp_end, p.sp_stock = b.get("sp"), b.get("sp_start") or "", b.get("sp_end") or "", b.get("sp_stock")
+                self.render_products()
+                self.refresh_undo()
+                if r["bad"]:
+                    self.log(f"{r['ok']} کالا برگشت، {len(r['bad'])} مورد ناموفق (در تاریخچه می‌ماند، دوباره بازگردانی بزنید):\n" +
+                             "\n".join(f"{k}: {m}" for k, m in r["bad"][:8]), "err")
+                else:
+                    self.log(f"{r['ok']} کالا به مقدار قبلی برگشت.", "ok")
+                if r["removals"] and not r["bad"]:
+                    self.log("تخفیف‌های تازه‌ثبت‌شده با تاریخ پایانِ گذشته بسته شدند؛ در پنل فروشندگان بررسی کنید.", "info")
+            self.ui(done)
+        self._run(f)
+
+    def show_history(self):
+        h = list(reversed(self.undo.history()))
+        body = vbox()
+        if not h:
+            body.add_widget(lab("هنوز تغییری ثبت نشده است.", MUT, 13, halign="center"))
+        for i, e in enumerate(h):
+            c = Bg(color=CHIP, radius=12, orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(2))
+            c.bind(minimum_height=c.setter("height"))
+            c.add_widget(lab(e.get("label") or "تغییر", TXT, 13, bold=True))
+            c.add_widget(lab(f"{L.jdate(e['ts'])} {e['ts'][11:16]} · {n(e.get('n'))} کالا" + (" · آخرین (قابل بازگردانی)" if i == 0 else ""), MUT, 11))
+            body.add_widget(c)
+        self.modal("تاریخچه‌ی تغییرات", "بازگردانی همیشه از آخرین تغییر شروع می‌شود؛ بعد از آن، تغییر قبل‌تر.", body,
+                   [("بستن", "sec", None)], h=0.8)
 
     # ---- orders
-    def _orders_list(self):
-        return self.client.orders(self.vendor_id, self.ent_sd.text.strip() or None, self.ent_ed.text.strip() or None,
+    def _range(self):
+        out = []
+        for e in (self.ent_sd, self.ent_ed):
+            t = e.text.strip()
+            out.append(L.parse_date(t).isoformat() if t else None)
+        if out[0] and out[1] and out[1] < out[0]:
+            raise ValueError("end before start")
+        return out
+
+    def _orders_list(self, sd, ed):
+        return self.client.orders(self.vendor_id, sd, ed,
                                   progress=lambda p, c: self.progress(f"دریافت سفارشات: {c} سفارش..."))
 
+    def _range_or_log(self):
+        try:
+            return self._range()
+        except Exception:
+            self.log("تاریخ‌ها نامعتبر است (یا پایان قبل از شروع است). نمونه: 1405/07/20 یا 2026-10-12", "err")
+            self.go("ord")
+            return None
+
     def render_orders(self):
-        self.ochips.clear_widgets()
         self.ol.clear_widgets()
+        chips = []
         if self.O:
             cnt = {}
             for o in self.O:
@@ -812,24 +1262,34 @@ class SnappShopApp(App):
             def addc(label, key, c):
                 ch = Chip(f"{label}  {n(c)}", key, active=(self.OF == key))
                 ch.bind(on_release=lambda x: self.set_of(x.key))
-                self.ochips.add_widget(ch)
+                chips.append(ch)
             addc("همه", "all", len(self.O))
             addc("نیازمند آماده‌سازی", "prep", sum(1 for o in self.O if o.prep))
             for s, c in cnt.items():
                 addc(L.status_fa(s) or "—", "st:" + s, c)
+        set_chips(self.ochips_sv, self.ochips, chips)
+        ix = L.ProdIndex(self.P)
         sel = [o for o in self.O if self.OF == "all" or (self.OF == "prep" and o.prep) or self.OF == "st:" + o.status]
         sel = sorted(sel, key=lambda o: o.pickup_end or "9") if self.OF == "prep" else list(reversed(sel))
         nowt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for o in sel[:150]:
-            c = TapBg(color=CARD, radius=12, orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(4))
+            c = TapBg(color=CARD, radius=14, border=True, orientation="vertical", size_hint_y=None, padding=dp(12), spacing=dp(4))
             c.bind(minimum_height=c.setter("height"))
             c.add_widget(lab(f"سفارش {o.num}", bold=True, size=14))
             c.add_widget(lab(f"{L.jdate(o.created)}  {o.created[11:16]}", MUT, 11))
+            names = []
+            for it in o.items[:3]:
+                p = ix.find(it)
+                if p:
+                    names.append(p.name[:32])
+            if names:
+                more = f" (+{len(o.items) - len(names)})" if len(o.items) > len(names) else ""
+                c.add_widget(lab("کالا: " + " ، ".join(names) + more, TXT, 12))
             if o.prep and o.pickup_end:
                 late = o.pickup_end < nowt
                 c.add_widget(lab(("مهلت تحویل به پیک گذشته: " if late else "مهلت تحویل به پیک: ") + f"{L.jdate(o.pickup_end)} {o.pickup_end[11:16]}", RED if late else AMB, 12))
             meta = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(24), spacing=dp(6))
-            meta.add_widget(BoxLayout())
+            meta.add_widget(Widget())
             tl = lab(f"جمع: {n(o.total)}", TXT, 13)
             tl.size_hint_x = None
             tl.width = dp(140)
@@ -851,8 +1311,11 @@ class SnappShopApp(App):
     def load_orders(self):
         if not self._need_vid():
             return
+        rng = self._range_or_log()
+        if rng is None:
+            return
         def f():
-            d = self._orders_list()
+            d = self._orders_list(*rng)
             def done():
                 self.O = [L.norm_order(o, i) for i, o in enumerate(d)]
                 self.OF = "all"
@@ -868,7 +1331,7 @@ class SnappShopApp(App):
         def f():
             d = self.client.order(self.vendor_id, num)
             o = L.norm_order(d if isinstance(d, dict) else {})
-            by_pn = {p.pnum: p for p in self.P if p.pnum}
+            ix = L.ProdIndex(self.P)
             def done():
                 body = vbox()
                 body.spacing = dp(2)
@@ -876,9 +1339,9 @@ class SnappShopApp(App):
                     row = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(8))
                     row.bind(minimum_height=row.setter("height"))
                     kl = lab(k, MUT, 12, halign="right")
-                    kl.size_hint_x = 0.38
+                    kl.size_hint_x = 0.34
+                    row.add_widget(lab(str(v), TXT, 13, halign="right"))   # value left, key at the right edge
                     row.add_widget(kl)
-                    row.add_widget(lab(str(v), TXT, 13, halign="right"))
                     body.add_widget(row)
                 kv("وضعیت", L.status_fa(o.status))
                 kv("ثبت", f"{L.jdate(o.created)} {o.created[11:16]}")
@@ -890,12 +1353,12 @@ class SnappShopApp(App):
                 if nm:
                     kv("خریدار", nm)
                 for it in o.items:
-                    p = by_pn.get(str(it.get("product_number") or ""))
+                    p = ix.find(it)
                     kv("کالا", (p.name if p else "") or it.get("sku") or it.get("product_number"))
                     q, cq = it.get("quantity"), it.get("canceled_quantity")
                     kv("تعداد", f"{q} (لغو: {cq})")
                     kv("قیمت نهایی", n(L.to_num(it.get("final_price"))))
-                self.modal(f"سفارش {num}", f"جمع: {n(o.total)}", body, [("بستن", ACC2, None)])
+                self.modal(f"سفارش {num}", f"جمع: {n(o.total)}", body, [("بستن", "sec", None)])
             self.ui(done)
         self._run(f)
 
@@ -942,8 +1405,11 @@ class SnappShopApp(App):
     def export_sales(self):
         if not self._need_vid():
             return
+        rng = self._range_or_log()
+        if rng is None:
+            return
         def f():
-            d = self._orders_list()
+            d = self._orders_list(*rng)
             if not d:
                 self.log("سفارشی در این بازه پیدا نشد.", "err")
                 return

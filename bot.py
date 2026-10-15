@@ -5,6 +5,7 @@ What it does while it runs:
   1. Watches new orders/cancellations (order events, cursor kept between runs) -> log + sound + orders_log.csv
   2. Applies price/stock/discount changes from prices.csv whenever you save that file
   3. Writes a daily Excel sales report (reports\\sales-YYYY-MM-DD.xlsx) with Jalali dates and low-stock sheet
+  4. Keeps a journal of every change it makes (undo.json) - `--undo` reverts the latest one
 Run with --help for options.
 """
 import argparse
@@ -27,6 +28,7 @@ APP_DIR = os.environ.get("SNAPP_BOT_DIR") or (os.path.dirname(sys.executable) if
 def P(name): return os.path.join(APP_DIR, name)
 CFG, STATE, PRICES = P("config.json"), P("state.json"), P("prices.csv")
 EXPORT, ORDERS_LOG, REPORTS = P("prices_export.csv"), P("orders_log.csv"), P("reports")
+UNDO = P("undo.json")             # journal of changes made by this program (shared with the GUI) -> "Undo"
 
 DEFAULT = {
     "user_agent": "", "token": "", "vendor_id": "",
@@ -201,7 +203,7 @@ class Bot:
         by_sku = {p.sku: p for p in prods if p.sku}
         by_id = {p.id: p for p in prods}
         limit = float(self.cfg.get("max_price_change_pct", 50))
-        items, lines, skipped = [], [], 0
+        items, snaps, lines, skipped = [], [], [], 0
         for r in rows:
             p = by_sku.get(r.get("sku", "")) if r.get("sku") else None
             if p is None and r.get("id"):
@@ -236,13 +238,22 @@ class Bot:
                         extra["special_price_stock"] = int(ss)
             if np_ != p.price or ns != p.stock or extra:
                 items.append(p.item(np_, ns, **extra))
+                snaps.append(L.snap(p))
                 lines.append(f"{p.key}: price {int(p.price or 0)}->{np_}, stock {int(p.stock or 0)}->{ns}" + (", discount" if extra else ""))
         if dry:
             log.info("prices.csv (DRY RUN - nothing sent): %d changes, %d skipped. Set \"prices_dry_run\": false in config.json to apply.", len(items), skipped)
             for ln in lines[:30]:
                 log.info("  would change %s", ln)
         elif items:
-            ok, bad = L.summarize_patch(self.client.patch_products(self.vid, items))
+            out = L.patch_outcome(items, self.client.patch_products(self.vid, items))
+            bad = [(L.item_key(it), m) for it, (good, m) in zip(items, out) if not good]
+            ok = len(items) - len(bad)
+            done = [(sn, it) for sn, it, (good, _m) in zip(snaps, items, out) if good]
+            if done:
+                try:
+                    L.UndoStore(UNDO).push(L.make_undo_entry("prices.csv", done))
+                except Exception as e:
+                    log.warning("could not save undo journal: %s", e)
             log.info("prices.csv applied: %d updated, %d failed, %d skipped", ok, len(bad), skipped)
             for k, m in bad[:20]:
                 log.warning("  FAILED %s: %s", k, m)
@@ -250,6 +261,19 @@ class Bot:
             log.info("prices.csv: nothing to change (%d skipped)", skipped)
         self.state[hkey] = h
         self.save_state()
+
+    def undo_last(self):
+        """Put the newest change (made by the GUI or by prices.csv) back as it was."""
+        r = L.run_undo(self.client, self.vid, L.UndoStore(UNDO))
+        if r is None:
+            log.info("Nothing to undo.")
+            return 0
+        log.info("Undo: %d restored, %d failed.", r["ok"], len(r["bad"]))
+        for k, m in r["bad"][:20]:
+            log.warning("  FAILED %s: %s", k, m)
+        if r["removals"]:
+            log.warning("Undo: %d newly created discount(s) were set to an already-ended window; check them in the seller panel.", r["removals"])
+        return 0 if not r["bad"] else 1
 
     def export_products(self):
         prods = self.products()
@@ -329,6 +353,7 @@ def main(argv=None):
     ap.add_argument("--once", action="store_true", help="run one pass and exit")
     ap.add_argument("--export", action="store_true", help="write prices_export.csv with all products")
     ap.add_argument("--report", action="store_true", help="write the Excel sales report now")
+    ap.add_argument("--undo", action="store_true", help="revert the most recent price/stock/discount change")
     ap.add_argument("--setup", action="store_true", help="re-run first-time setup")
     ap.add_argument("--install-startup", action="store_true", help="start with Windows")
     ap.add_argument("--uninstall-startup", action="store_true")
@@ -357,6 +382,8 @@ def main(argv=None):
         if a.report:
             bot.report(force=True)
             return 0
+        if a.undo:
+            return bot.undo_last()
         return bot.run(once=a.once)
     except core.AuthError as e:
         log.error("Token rejected: %s", e)
