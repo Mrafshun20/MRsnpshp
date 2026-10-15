@@ -3,11 +3,7 @@
 Built on the official SnappShop vendor API (v2.1.2) field names."""
 import datetime
 import io
-import json
-import os
 import re
-import threading
-import unicodedata
 import zipfile
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape
@@ -27,32 +23,6 @@ def to_num(v) -> Optional[float]:
         except ValueError:
             return None
     return None
-
-
-# ---------------- Persian text helpers ----------------
-_FA_TRANS = str.maketrans({
-    "\u064a": "\u06cc", "\u0649": "\u06cc", "\u0643": "\u06a9", "\u0629": "\u0647", "\u06c0": "\u0647",
-    "\u0623": "\u0627", "\u0625": "\u0627", "\u200c": "", "\u200d": "", "\u0640": "",
-    **{chr(0x6F0 + i): str(i) for i in range(10)}, **{chr(0x660 + i): str(i) for i in range(10)},
-})
-_HARAKAT = re.compile("[\u064b-\u065f\u0670]")
-
-
-def norm_fa(s) -> str:
-    """Lower-case + unify Arabic/Persian letter variants and digits, so typed text matches titles."""
-    t = _HARAKAT.sub("", str(s or "")).translate(_FA_TRANS).lower()
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def unshape_line(line: str, bidi) -> str:
-    """Visual (shaped + bidi-reordered) line -> logical text, so Copy gives normal Persian.
-    `bidi` is get_display. Order matters: reorder first (ligatures are still one char), then expand forms."""
-    out = []
-    for ch in bidi(line):
-        if "\ufb50" <= ch <= "\ufdff" or "\ufe70" <= ch <= "\ufeff":
-            ch = unicodedata.normalize("NFKC", ch)
-        out.append(ch)
-    return "".join(out)
 
 
 def flat(o, pre="", out=None, d=0):
@@ -102,33 +72,6 @@ def g2j(gy: int, gm: int, gd: int):
     return jy, jm, jd
 
 
-def j2g(jy: int, jm: int, jd: int):
-    jy += 1595
-    days = (-355668 + 365 * jy + (jy // 33) * 8 + ((jy % 33) + 3) // 4 + jd
-            + ((jm - 1) * 31 if jm < 7 else (jm - 7) * 30 + 186))
-    gy = 400 * (days // 146097)
-    days %= 146097
-    if days > 36524:
-        days -= 1
-        gy += 100 * (days // 36524)
-        days %= 36524
-        if days >= 365:
-            days += 1
-    gy += 4 * (days // 1461)
-    days %= 1461
-    if days > 365:
-        gy += (days - 1) // 365
-        days = (days - 1) % 365
-    gd = days + 1
-    leap = (gy % 4 == 0 and gy % 100 != 0) or gy % 400 == 0
-    sal = [0, 31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    gm = 0
-    while gm < 13 and gd > sal[gm]:
-        gd -= sal[gm]
-        gm += 1
-    return gy, gm, gd
-
-
 def jdate(s: str) -> str:
     """'2026-10-12 17:51:47' -> '1405/07/20'"""
     m = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(s or ""))
@@ -136,21 +79,6 @@ def jdate(s: str) -> str:
         return ""
     y, mo, d = g2j(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     return f"{y:04d}/{mo:02d}/{d:02d}"
-
-
-def parse_date(text) -> datetime.date:
-    """Accepts Gregorian (2026-10-12) or Jalali (1405/07/20), Persian or Latin digits, - / . separators.
-    A year below 1700 is taken as Jalali. Raises ValueError when it is not a real date."""
-    t = norm_fa(text)
-    m = re.fullmatch(r"(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})", t)
-    if not m:
-        raise ValueError("bad date")
-    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    if y < 1700:
-        if not (1 <= mo <= 12 and 1 <= d <= 31) or (mo > 6 and d > 30):
-            raise ValueError("bad jalali date")
-        y, mo, d = j2g(y, mo, d)
-    return datetime.date(y, mo, d)
 
 
 ORDER_STATUS_FA = {"CONFIRMED": "تأیید شده", "CANCELED": "لغو شده", "CANCELLED": "لغو شده"}
@@ -166,12 +94,10 @@ class Prod:
     def __init__(self, raw: dict, i: int):
         g = raw.get
         self.raw, self.i, self.sel = raw, i, False
-        self.id = str(g("id") or "")                       # == inventory_product_id; used for PATCH when sku is null
+        self.id = str(g("id") or "")
         self.sku = str(g("sku")) if g("sku") not in (None, "") else ""
         self.name = str(g("title") or g("title_en") or "(بدون نام)")
-        self.title_en = str(g("title_en") or "")
         self.pnum = str(g("product_number") or "")
-        self.vpi = str(g("vendor_product_info_id") or "")  # the id that order items carry
         self.price = to_num(g("price"))
         self.stock = to_num(g("stock"))
         self.wstock = to_num(g("warehouse_stock"))
@@ -183,51 +109,18 @@ class Prod:
         self.sp_end = str(d.get("end_at") or "")
         self.sp_stock = to_num(d.get("stock"))
         self.sp_pct = to_num(d.get("percent"))
-        self.buy_box = to_num(g("buy_box"))                # lowest competing price Snapp shows for this product
-        self.is_buy_box = g("is_buy_box") is True          # this seller currently owns the buy box
+        self.buy_box = to_num(g("buy_box"))
+        self.is_bb = g("is_buy_box") is True
+        rp = g("reference_price") if isinstance(g("reference_price"), dict) else {}
+        self.ref_lo, self.ref_hi = to_num(rp.get("lower_margin")), to_num(rp.get("upper_margin"))
         self.blacklist = g("is_blacklist") is True
-        va = []
-        for a in (g("variation_attributes") or []):
-            if isinstance(a, dict):
-                t = (a.get("attribute") or {}).get("title")
-                v = (a.get("value") or {}).get("title")
-                if v:
-                    va.append(f"{t}: {v}" if t else str(v))
-        self.variant = " ، ".join(va)
-        self.hay = norm_fa(f"{self.name} {self.title_en} {self.sku} {self.id} {self.pnum} {self.variant}")
 
     @property
     def key(self) -> str:
         return self.sku or self.id
 
-    def discount_state(self, now: str):
-        """'active' | 'scheduled' | 'expired' | None.
-        `now` is 'YYYY-MM-DD HH:MM:SS' (times are compared) or just 'YYYY-MM-DD' (whole days are compared)."""
-        if self.sp is None or self.sp <= 0:
-            return None
-        full = len(now) > 10
-        end, start = self.sp_end, self.sp_start
-        if end and ((end < now) if (full and len(end) > 10) else (end[:10] < now[:10])):
-            return "expired"
-        if start and ((start > now) if (full and len(start) > 10) else (start[:10] > now[:10])):
-            return "scheduled"
-        return "active"
-
     def has_discount(self, today: str) -> bool:
-        """Discount that is running now or scheduled for later (not expired)."""
-        return self.discount_state(today) in ("active", "scheduled")
-
-    def eff_price(self, now: str):
-        return self.sp if self.discount_state(now) == "active" else self.price
-
-    def buybox_state(self, now: str):
-        """'win' (we own the buy box) | 'lose' (a competitor is cheaper) | None (unknown / tied)."""
-        if self.is_buy_box:
-            return "win"
-        e = self.eff_price(now)
-        if self.buy_box and e and self.buy_box < e:
-            return "lose"
-        return None
+        return self.sp is not None and self.sp > 0 and (not self.sp_end or self.sp_end[:10] >= today)
 
     def item(self, price=None, stock=None, **extra) -> dict:
         """PATCH item: id|sku + stock + price are mandatory in the API."""
@@ -245,26 +138,8 @@ def norm_prod(raw: dict, i: int = 0) -> Prod:
     return Prod(raw, i)
 
 
-class ProdIndex:
-    """Finds the product that an order/event item refers to (items carry product_number,
-    inventory_product_id and vendor_product_info_id, never a title)."""
-
-    def __init__(self, prods):
-        self.pn = {p.pnum: p for p in (prods or []) if p.pnum}
-        self.inv = {p.id: p for p in (prods or []) if p.id}
-        self.vpi = {p.vpi: p for p in (prods or []) if p.vpi}
-
-    def find(self, it) -> Optional["Prod"]:
-        if not isinstance(it, dict):
-            return None
-        return (self.pn.get(str(it.get("product_number") or ""))
-                or self.inv.get(str(it.get("inventory_product_id") or ""))
-                or self.vpi.get(str(it.get("vendor_product_info_id") or "")))
-
-
 FILTERS = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"),
-           ("low", "کم‌موجودی"), ("oos", "ناموجود"), ("disc", "دارای تخفیف"),
-           ("bbwin", "برنده باکس"), ("bblose", "رقیب ارزان‌تر")]
+           ("low", "کم‌موجودی"), ("oos", "ناموجود"), ("disc", "دارای تخفیف"), ("lostbb", "باخته در باکس‌باکس")]
 
 
 def match(o: Prod, key: str, low: int, today: str) -> bool:
@@ -282,16 +157,9 @@ def match(o: Prod, key: str, low: int, today: str) -> bool:
         return o.stock is not None and o.stock <= 0
     if key == "disc":
         return o.has_discount(today)
-    if key == "bbwin":
-        return o.buybox_state(today) == "win"
-    if key == "bblose":
-        return o.buybox_state(today) == "lose"
+    if key == "lostbb":
+        return o.buy_box is not None and not o.is_bb
     return True
-
-
-def match_query(o: Prod, q: str) -> bool:
-    """Every word of the (normalised) query must appear somewhere in the product text."""
-    return all(t in o.hay for t in norm_fa(q).split())
 
 
 def plan_bulk(prods: List[Prod], pct=None, amt=None, stock=None):
@@ -333,6 +201,56 @@ def plan_discount(prods: List[Prod], pct: float, start: str, end: str, dstock=No
     return out, skipped
 
 
+def reprice_floor(o: Prod, explicit=None, max_disc_pct=45.0):
+    """Lowest special_price the bot may ever set: the highest of (your min_price, SnappShop's
+    reference lower margin, list price minus max_disc_pct %)."""
+    f = [0.0]
+    if explicit:
+        f.append(float(explicit))
+    if o.ref_lo:
+        f.append(float(o.ref_lo))
+    if o.price:
+        f.append(float(o.price) * (1 - max_disc_pct / 100.0))
+    return int(max(f) + 0.999)
+
+
+def plan_reprice(prods: List[Prod], today: str, delta=5000, floors=None, max_disc_pct=45.0,
+                 max_drop_pct=15.0, days=30, done_today=None, max_per_day=4):
+    """Buy-box repricing through special_price. Returns (changes, skips):
+    changes = [(prod, patch_item, old_effective, new_price)], skips = [(prod, reason)]."""
+    floors, done_today = floors or {}, done_today or {}
+    changes, skips = [], []
+    end_default = (datetime.date.fromisoformat(today) + datetime.timedelta(days=int(days))).isoformat()
+    for o in prods:
+        if o.buy_box is None or o.is_bb:
+            continue
+        if o.blacklist:
+            skips.append((o, "blacklisted")); continue
+        if o.active is not True or not o.stock or o.stock <= 0:
+            skips.append((o, "inactive or out of stock")); continue
+        if o.price is None:
+            continue
+        eff = o.sp if o.has_discount(today) else o.price
+        if o.buy_box >= eff:
+            continue  # not losing on price
+        if done_today.get(o.key, 0) >= max_per_day:
+            skips.append((o, f"daily limit {max_per_day} reached")); continue
+        target = int(o.buy_box - delta)
+        floor = reprice_floor(o, floors.get(o.key) or floors.get(o.id), max_disc_pct)
+        if target < floor:
+            skips.append((o, f"competitor {int(o.buy_box)} -> target {target} is below floor {floor}")); continue
+        if eff > 0 and (eff - target) / eff * 100 > max_drop_pct:
+            skips.append((o, f"drop {int(eff)}->{target} exceeds {max_drop_pct:g}% (suspicious)")); continue
+        if o.has_discount(today):
+            start, end = (o.sp_start[:10] or today), (o.sp_end[:10] or end_default)
+            ds = int(min(o.sp_stock, o.stock)) if o.sp_stock else int(o.stock)
+        else:
+            start, end, ds = today, end_default, int(o.stock)
+        changes.append((o, o.item(special_price=target, special_price_start_at=start,
+                                  special_price_end_at=end, special_price_stock=ds), int(eff), target))
+    return changes, skips
+
+
 def summarize_patch(results: List[dict]):
     """(ok_count, [(key, message)]) from PATCH response data."""
     ok, bad = 0, []
@@ -342,197 +260,6 @@ def summarize_patch(results: List[dict]):
         else:
             ok += 1
     return ok, bad
-
-
-def item_key(it: dict) -> str:
-    return str(it.get("sku") or it.get("id") or "?")
-
-
-def patch_outcome(items: List[dict], results: List[dict]):
-    """Per-item [(ok, message)] aligned with `items`.
-    Results are matched by sku/id; if the API answers with ids we never sent, fall back to position.
-    An item that gets no result at all is treated as accepted."""
-    out = [(True, "") for _ in items]
-    idx = {}
-    for i, it in enumerate(items):
-        for k in (it.get("sku"), it.get("id")):
-            if k:
-                idx.setdefault(str(k), i)
-    for j, r in enumerate(results or []):
-        if not isinstance(r, dict):
-            continue
-        i = idx.get(str(r.get("sku"))) if r.get("sku") else None
-        if i is None and r.get("id"):
-            i = idx.get(str(r.get("id")))
-        if i is None and len(results) == len(items):
-            i = j
-        if i is None:
-            continue
-        if r.get("status") is False:
-            out[i] = (False, "; ".join(str(m) for m in (r.get("messages") or [])) or "failed")
-    return out
-
-
-# ---------------- undo (change journal) ----------------
-def _i(v):
-    return None if v is None else int(round(v))
-
-
-def snap(p: Prod) -> dict:
-    """What a product looked like before we change it."""
-    return {"id": p.id, "sku": p.sku, "name": p.name, "price": _i(p.price), "stock": _i(p.stock),
-            "sp": _i(p.sp), "sp_start": p.sp_start[:10], "sp_end": p.sp_end[:10], "sp_stock": _i(p.sp_stock)}
-
-
-def after_state(before: dict, item: dict) -> dict:
-    a = dict(before)
-    a["price"], a["stock"] = int(item["price"]), int(item["stock"])
-    if item.get("special_price") is not None:
-        a["sp"] = int(item["special_price"])
-        if "special_price_start_at" in item:
-            a["sp_start"] = str(item["special_price_start_at"])[:10]
-        if "special_price_end_at" in item:
-            a["sp_end"] = str(item["special_price_end_at"])[:10]
-        if "special_price_stock" in item:
-            a["sp_stock"] = int(item["special_price_stock"])
-    return a
-
-
-def make_undo_entry(label: str, pairs, now: Optional[datetime.datetime] = None) -> dict:
-    """pairs: [(snap_before, patch_item)] for items the API accepted."""
-    now = now or datetime.datetime.now()
-    items = []
-    for b, it in pairs:
-        a = after_state(b, it)
-        if a != b:
-            items.append({"id": b["id"], "sku": b["sku"], "name": b["name"], "before": b, "after": a})
-    return {"id": now.strftime("%Y%m%d-%H%M%S-%f"), "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "label": label, "n": len(items), "items": items}
-
-
-def revert_items(entry: dict, today: Optional[datetime.date] = None):
-    """PATCH items that put every product in `entry` back as it was.
-    Returns (items, removals, skipped); `removals` counts discounts that did not exist before and
-    must be switched off - the API documents no 'delete discount', so those get an already-ended window."""
-    today = today or datetime.date.today()
-    items, removals, skipped = [], 0, 0
-    for it in entry.get("items", []):
-        b, a = it["before"], it["after"]
-        if b.get("price") is None or b.get("stock") is None:
-            skipped += 1
-            continue
-        out = {"sku": it["sku"]} if it.get("sku") else {"id": it["id"]}
-        out["price"], out["stock"] = int(b["price"]), int(b["stock"])
-        if any(a.get(k) != b.get(k) for k in ("sp", "sp_start", "sp_end", "sp_stock")):
-            if b.get("sp"):
-                out["special_price"] = int(b["sp"])
-                if b.get("sp_start"):
-                    out["special_price_start_at"] = b["sp_start"]
-                if b.get("sp_end"):
-                    out["special_price_end_at"] = b["sp_end"]
-                if b.get("sp_stock") is not None:
-                    out["special_price_stock"] = int(b["sp_stock"])
-            elif a.get("sp"):
-                y = (today - datetime.timedelta(days=1)).isoformat()
-                out["special_price"] = int(a["sp"])
-                out["special_price_start_at"] = y
-                out["special_price_end_at"] = y
-                removals += 1
-        items.append(out)
-    return items, removals, skipped
-
-
-def describe_change(it: dict) -> str:
-    """Two short lines for the undo preview: product name, then what goes back to what."""
-    b, a = it["before"], it["after"]
-
-    def f(v):
-        return "—" if v is None else f"{int(v):,}"
-    parts = []
-    if a.get("price") != b.get("price"):
-        parts.append(f"قیمت {f(a.get('price'))} به {f(b.get('price'))}")
-    if a.get("stock") != b.get("stock"):
-        parts.append(f"موجودی {f(a.get('stock'))} به {f(b.get('stock'))}")
-    if any(a.get(k) != b.get(k) for k in ("sp", "sp_start", "sp_end", "sp_stock")):
-        parts.append(f"تخفیف به {f(b.get('sp'))}" if b.get("sp") else "تخفیف برداشته می‌شود")
-    return f"{it.get('name') or it.get('sku') or it.get('id')}\n" + " · ".join(parts)
-
-
-class UndoStore:
-    """JSON file with the last changes made through this program (newest last).
-    The GUI and the background bot share the file, so every access is locked and writes are atomic."""
-    MAX_ENTRIES = 20
-    MAX_ITEMS = 8000
-    _LOCK = threading.RLock()
-
-    def __init__(self, path: str):
-        self.path = path
-
-    def _read(self) -> List[dict]:
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                d = json.load(f)
-            return d if isinstance(d, list) else []
-        except Exception:
-            return []
-
-    def _write(self, entries: List[dict]):
-        while len(entries) > self.MAX_ENTRIES or (len(entries) > 1 and sum(len(e.get("items", [])) for e in entries) > self.MAX_ITEMS):
-            entries.pop(0)
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(entries, f, ensure_ascii=False)
-        os.replace(tmp, self.path)
-
-    def history(self) -> List[dict]:
-        with self._LOCK:
-            return self._read()
-
-    def last(self) -> Optional[dict]:
-        h = self.history()
-        return h[-1] if h else None
-
-    def push(self, entry: dict):
-        if not entry.get("items"):
-            return
-        with self._LOCK:
-            h = self._read()
-            h.append(entry)
-            self._write(h)
-
-    def remove(self, entry_id: str):
-        with self._LOCK:
-            self._write([e for e in self._read() if e.get("id") != entry_id])
-
-    def replace(self, entry: dict):
-        with self._LOCK:
-            self._write([entry if e.get("id") == entry.get("id") else e for e in self._read()])
-
-
-def run_undo(client, vid: str, store: UndoStore):
-    """Put the newest journal entry back on SnappShop. `client` needs patch_products(vid, items).
-    Returns None when there is nothing to undo, else a dict:
-      ok (count restored), bad [(key, message)], removals, skipped, restored [journal items now back to 'before']."""
-    entry = store.last()
-    if not entry:
-        return None
-    items, removals, skipped = revert_items(entry)
-    res = client.patch_products(vid, items) if items else []
-    out = patch_outcome(items, res)
-    ok_keys, bad = set(), []
-    for it, (ok, msg) in zip(items, out):
-        (ok_keys.add(item_key(it)) if ok else bad.append((item_key(it), msg)))
-    restored = [x for x in entry["items"] if item_key(x) in ok_keys]
-    bad_keys = {k for k, _m in bad}
-    left = [x for x in entry["items"] if item_key(x) in bad_keys]   # failed ones stay so the user can retry
-    if left:
-        e2 = dict(entry)
-        e2["items"], e2["n"] = left, len(left)
-        store.replace(e2)
-    else:
-        store.remove(entry["id"])
-    return {"ok": len(ok_keys), "bad": bad, "removals": removals, "skipped": skipped, "restored": restored}
 
 
 # ---------------- orders / events ----------------
@@ -650,7 +377,8 @@ SALES_COLS = [("order_number", "شماره سفارش"), ("date", "تاریخ م
 
 
 def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None, low: int = 3) -> bytes:
-    index = ProdIndex(prods)
+    by_pn = {p.pnum: p for p in (prods or []) if p.pnum}
+    by_id = {p.id: p for p in (prods or []) if p.id}
     rows, by_sku, by_day = [], {}, {}
     for o in orders:
         num = o.get("order_number")
@@ -664,7 +392,7 @@ def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None,
         for it in (o.get("items") or [{}]):
             q = to_num(it.get("quantity")) or 0
             cq = to_num(it.get("canceled_quantity")) or 0
-            p = index.find(it)
+            p = by_pn.get(str(it.get("product_number") or "")) or by_id.get(str(it.get("vendor_product_info_id") or ""))
             sku = it.get("sku") or (p.sku if p else "") or ""
             fp = to_num(it.get("final_price")) or 0
             row = {"order_number": num, "date": day, "jdate": jdate(created), "time": created[11:19],
@@ -706,8 +434,9 @@ def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None,
 
 def products_export_rows(prods: List[Prod]):
     cols = ["sku", "id", "title", "price", "stock", "warehouse_stock", "active", "special_price",
-            "special_start", "special_end", "special_stock"]
+            "special_start", "special_end", "special_stock", "buy_box", "is_buy_box", "ref_min", "ref_max"]
     rows = [{"sku": p.sku, "id": p.id, "title": p.name, "price": p.price, "stock": p.stock,
              "warehouse_stock": p.wstock, "active": p.active, "special_price": p.sp,
-             "special_start": p.sp_start, "special_end": p.sp_end, "special_stock": p.sp_stock} for p in prods]
+             "special_start": p.sp_start, "special_end": p.sp_end, "special_stock": p.sp_stock, "buy_box": p.buy_box, "is_buy_box": p.is_bb,
+             "ref_min": p.ref_lo, "ref_max": p.ref_hi} for p in prods]
     return cols, rows
