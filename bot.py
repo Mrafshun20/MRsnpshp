@@ -133,6 +133,7 @@ class Bot:
         self.vid = cfg["vendor_id"]
         self.cfg_mtime = os.path.getmtime(CFG) if os.path.exists(CFG) else 0
         self.stop_ev = threading.Event()
+        self.publish = None          # optional hook: path -> where the user can find the file (Android Downloads)
 
     def stop(self):
         self.stop_ev.set()
@@ -149,6 +150,15 @@ class Bot:
                 log.info("config.json reloaded")
         except OSError:
             pass
+
+    def journal(self, label, pairs, items, res):
+        """Record the previous values of successfully changed products so the app can Undo them."""
+        try:
+            out = L.patch_outcome(items, res)
+            good = [pr for pr, (g, _m) in zip(pairs, out) if g]
+            L.UndoStore(P("undo.json")).push(L.make_undo_entry(label, good))
+        except Exception:
+            log.exception("undo journal failed")
 
     def products(self):
         return [L.norm_prod(p, i) for i, p in enumerate(self.client.products(self.vid))]
@@ -172,7 +182,7 @@ class Bot:
         self.state["events_init"] = True
         self.save_state()
         if first:
-            log.info("Order events: caught up (%d older events skipped). Alerts start now.", len(evs))
+            log.info("پایش سفارشات فعال شد؛ از این لحظه سفارش جدید و لغو اعلام می‌شود (%d رویداد قبلی نادیده گرفته شد).", len(evs))
             return
         for e in evs:
             t = e.get("event_type")
@@ -182,11 +192,12 @@ class Bot:
                 with open(ORDERS_LOG, "a", newline="", encoding="utf-8-sig" if new else "utf-8") as f:
                     w = csv.writer(f)
                     if new:
-                        w.writerow(["logged_at", "event_type", "order_number", "event_at", "items", "final_price_total"])
+                        w.writerow(["زمان ثبت", "نوع رویداد", "شماره سفارش", "تاریخ رویداد (شمسی)", "تعداد اقلام", "مبلغ کل (تومان)"])
                     items = e.get("items") or []
                     tot = sum(L.to_num(i.get("final_price")) or 0 for i in items if isinstance(i, dict))
-                    w.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), t, e.get("order_number"),
-                                e.get("event_at"), len(items), int(tot)])
+                    ea = str(e.get("event_at") or "")
+                    w.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), L.EVENT_FA.get(t, t), e.get("order_number"),
+                                (L.jdate(ea) + " " + ea[11:16]).strip(), len(items), int(tot)])
                 self.beep(t)
 
     # ---- 2) prices.csv sync
@@ -209,24 +220,24 @@ class Bot:
         by_sku = {p.sku: p for p in prods if p.sku}
         by_id = {p.id: p for p in prods}
         limit = float(self.cfg.get("max_price_change_pct", 50))
-        items, lines, skipped = [], [], 0
+        items, lines, skipped, pairs = [], [], 0, []
         for r in rows:
             p = by_sku.get(r.get("sku", "")) if r.get("sku") else None
             if p is None and r.get("id"):
                 p = by_id.get(r["id"])
             if p is None:
                 if r.get("sku") or r.get("id"):
-                    log.warning("prices.csv: product not found: %s", r.get("sku") or r.get("id"))
+                    log.warning("prices.csv: کالا پیدا نشد: %s", r.get("sku") or r.get("id"))
                 continue
             price, stock = L.to_num(r.get("price")), L.to_num(r.get("stock"))
             np_ = int(price) if price is not None else p.price
             ns = int(stock) if stock is not None else p.stock
             if np_ is None or ns is None or np_ <= 0 or ns < 0:
-                log.warning("prices.csv: invalid values for %s", p.key)
+                log.warning("prices.csv: مقدار نامعتبر برای %s", p.key)
                 skipped += 1
                 continue
             if p.price and abs(np_ - p.price) / p.price * 100 > limit:
-                log.warning("SKIPPED %s: price %d -> %d changes more than %s%% (max_price_change_pct)", p.key, p.price, np_, limit)
+                log.warning("رد شد %s: تغییر قیمت %d ← %d بیش از %s٪ است (احتمال اشتباه تایپی)", p.key, p.price, np_, limit)
                 skipped += 1
                 continue
             extra = {}
@@ -243,19 +254,23 @@ class Bot:
                     if ss is not None:
                         extra["special_price_stock"] = int(ss)
             if np_ != p.price or ns != p.stock or extra:
-                items.append(p.item(np_, ns, **extra))
+                it = p.item(np_, ns, **extra)
+                items.append(it)
+                pairs.append((L.snap(p), it))
                 lines.append(f"{p.key}: price {int(p.price or 0)}->{np_}, stock {int(p.stock or 0)}->{ns}" + (", discount" if extra else ""))
         if dry:
-            log.info("prices.csv (DRY RUN - nothing sent): %d changes, %d skipped. Set \"prices_dry_run\": false in config.json to apply.", len(items), skipped)
+            log.info("prices.csv (حالت آزمایشی - چیزی ارسال نشد): %d تغییر، %d رد شده. برای اعمال واقعی، حالت آزمایشی را در برنامه خاموش کنید.", len(items), skipped)
             for ln in lines[:30]:
-                log.info("  would change %s", ln)
+                log.info("  تغییر می‌کرد: %s", ln)
         elif items:
-            ok, bad = L.summarize_patch(self.client.patch_products(self.vid, items))
-            log.info("prices.csv applied: %d updated, %d failed, %d skipped", ok, len(bad), skipped)
+            res = self.client.patch_products(self.vid, items)
+            ok, bad = L.summarize_patch(res)
+            self.journal("فایل prices.csv", pairs, items, res)
+            log.info("prices.csv اعمال شد: %d موفق، %d ناموفق، %d رد شده (با «بازگردانی تغییرات» برگردانید)", ok, len(bad), skipped)
             for k, m in bad[:20]:
-                log.warning("  FAILED %s: %s", k, m)
+                log.warning("  ناموفق %s: %s", k, m)
         else:
-            log.info("prices.csv: nothing to change (%d skipped)", skipped)
+            log.info("prices.csv: تغییری لازم نبود (%d رد شده)", skipped)
         self.state[hkey] = h
         self.save_state()
 
@@ -282,20 +297,21 @@ class Bot:
             float(self.cfg.get("reprice_max_discount_pct", 45)), float(self.cfg.get("reprice_max_drop_pct", 15)),
             int(self.cfg.get("reprice_days", 30)), st["n"], int(self.cfg.get("reprice_max_per_day", 4)))
         for o, why in skips[:20]:
-            log.info("reprice skip %s: %s", o.key, why)
+            log.info("تعدیل قیمت: %s رد شد (%s)", o.key, why)
         if not changes:
-            log.info("reprice: nothing to change (%d skipped)", len(skips))
+            log.info("تعدیل قیمت: تغییری لازم نبود (%d رد شده)", len(skips))
             return
         rows = []
         if mode == "dry":
             for o, it, old, new in changes[:30]:
-                log.info("reprice (DRY RUN) %s: %d -> %d  (buy box %d)", o.key, old, new, int(o.buy_box))
+                log.info("تعدیل قیمت (آزمایشی) %s: %d ← %d  (بای‌باکس %d)", o.key, old, new, int(o.buy_box))
                 rows.append((o, old, new, "dry"))
         else:
-            res = L.summarize_patch(self.client.patch_products(self.vid, [c[1] for c in changes]))
-            ok, bad = res
+            raw_res = self.client.patch_products(self.vid, [c[1] for c in changes])
+            self.journal("تعدیل خودکار بای‌باکس", [(L.snap(c[0]), c[1]) for c in changes], [c[1] for c in changes], raw_res)
+            ok, bad = L.summarize_patch(raw_res)
             badk = {k for k, _ in bad}
-            log.info("reprice applied: %d updated, %d failed", ok, len(bad))
+            log.info("تعدیل قیمت اعمال شد: %d موفق، %d ناموفق", ok, len(bad))
             for k, m in bad[:20]:
                 log.warning("  FAILED %s: %s", k, m)
             for o, it, old, new in changes:
@@ -303,7 +319,7 @@ class Bot:
                     continue
                 st["n"][o.key] = st["n"].get(o.key, 0) + 1
                 rows.append((o, old, new, "live"))
-                log.info("reprice %s: %d -> %d  (buy box %d)", o.key, old, new, int(o.buy_box))
+                log.info("تعدیل قیمت %s: %d ← %d  (بای‌باکس %d)", o.key, old, new, int(o.buy_box))
             self.state["reprice_n"] = st
             self.save_state()
         new_file = not os.path.exists(REPRICE_LOG)
@@ -322,7 +338,7 @@ class Bot:
             w.writeheader()
             for r in rows:
                 w.writerow({k: ("" if v is None else (int(v) if isinstance(v, float) else v)) for k, v in r.items()})
-        log.info("Wrote %d products to %s. Copy it to prices.csv, edit price/stock/special_* and save.", len(rows), EXPORT)
+        log.info("فایل قیمت‌ها (%d کالا) ساخته شد:\n%s\nآن را با نام prices.csv کپی کنید، ویرایش و ذخیره کنید.", len(rows), self.publish(EXPORT) if self.publish else EXPORT)
 
     # ---- 3) daily report
     def report(self, force=False):
@@ -350,7 +366,7 @@ class Bot:
             f.write(data)
         self.state["last_report"] = today
         self.save_state()
-        log.info("Report saved: %s (%d orders, %s..%s)", path, len(orders), start, today)
+        log.info("گزارش فروش ذخیره شد (%d سفارش، %s تا %s):\n%s", len(orders), start, today, self.publish(path) if self.publish else path)
 
     # ---- main loop
     def safe(self, name, fn):
@@ -366,7 +382,7 @@ class Bot:
 
     def run(self, once=False):
         keep_awake()
-        log.info("Bot started. Store %s. Orders check every %ss. prices_dry_run=%s",
+        log.info("ربات برای فروشگاه %s روشن شد (بررسی سفارش هر %s ثانیه | حالت آزمایشی prices.csv: %s).",
                  self.vid, self.cfg.get("events_interval_sec"), self.cfg.get("prices_dry_run"))
         last_ev = last_rp = 0.0
         while not self.stop_ev.is_set():
@@ -386,7 +402,7 @@ class Bot:
             if once:
                 return 0
             if self.stop_ev.wait(10):
-                log.info("Bot stopped.")
+                log.info("ربات متوقف شد.")
                 return 0
             self.reload_cfg()
 

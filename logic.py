@@ -3,7 +3,10 @@
 Built on the official SnappShop vendor API (v2.1.2) field names."""
 import datetime
 import io
+import json
+import os
 import re
+import unicodedata
 import zipfile
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape
@@ -81,6 +84,60 @@ def jdate(s: str) -> str:
     return f"{y:04d}/{mo:02d}/{d:02d}"
 
 
+def j2g(jy: int, jm: int, jd: int):
+    """Jalali -> (gy, gm, gd). Raises ValueError for impossible dates (e.g. 1405/07/31)."""
+    if not (1 <= jm <= 12 and 1 <= jd <= 31):
+        raise ValueError("bad jalali date")
+    doy = (jm - 1) * 31 + jd - 1 if jm <= 6 else 186 + (jm - 7) * 30 + jd - 1
+    base = datetime.date(jy + 621, 3, 20) + datetime.timedelta(days=doy)
+    for k in (0, 1, -1, 2, -2):
+        c = base + datetime.timedelta(days=k)
+        if g2j(c.year, c.month, c.day) == (jy, jm, jd):
+            return c.year, c.month, c.day
+    raise ValueError("bad jalali date")
+
+
+_DIGITS = {ord(c): str(i) for i, c in enumerate("٠١٢٣٤٥٦٧٨٩")}
+_DIGITS.update({ord(c): str(i) for i, c in enumerate("۰۱۲۳۴۵۶۷۸۹")})
+
+
+def norm_fa(text) -> str:
+    """Normalize Persian/Arabic text for searching: ي/ك, digits, ZWNJ, case."""
+    t = str(text or "").translate(_DIGITS).replace("ي", "ی").replace("ك", "ک").replace("ى", "ی")
+    t = t.replace("\u200c", "").replace("\u200f", "").replace("\u200e", "")
+    return t.lower()
+
+
+def parse_date(text) -> datetime.date:
+    """Accepts Gregorian or Jalali, '-' or '/', Persian digits. Raises ValueError."""
+    t = norm_fa(text).strip()
+    m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t)
+    if not m:
+        raise ValueError("bad date: " + str(text))
+    y, mo, d = (int(x) for x in m.groups())
+    if y < 1700:
+        y, mo, d = j2g(y, mo, d)
+    return datetime.date(y, mo, d)
+
+
+def match_query(o, q: str) -> bool:
+    """Every word of the query must appear in name / English name / code / variant."""
+    toks = norm_fa(q).split()
+    if not toks:
+        return True
+    hay = norm_fa(" ".join((o.name, o.name_en, o.sku, o.id, o.pnum, o.variant)))
+    return all(t in hay for t in toks)
+
+
+def unshape_line(shaped: str, bidi) -> str:
+    """Undo arabic_reshaper+bidi for one displayed line, so copied text is normal Persian again."""
+    out = []
+    for ch in bidi(shaped):
+        o = ord(ch)
+        out.append(unicodedata.normalize("NFKC", ch) if (0xFB50 <= o <= 0xFDFF or 0xFE70 <= o <= 0xFEFF) else ch)
+    return "".join(out)
+
+
 ORDER_STATUS_FA = {"CONFIRMED": "تأیید شده", "CANCELED": "لغو شده", "CANCELLED": "لغو شده"}
 EVENT_FA = {"NEW_ORDER": "سفارش جدید", "CANCELLATION": "لغو کالا", "CHANGE_STATUS": "تغییر وضعیت"}
 
@@ -98,6 +155,12 @@ class Prod:
         self.sku = str(g("sku")) if g("sku") not in (None, "") else ""
         self.name = str(g("title") or g("title_en") or "(بدون نام)")
         self.pnum = str(g("product_number") or "")
+        self.vpi = str(g("vendor_product_info_id") or "")
+        self.name_en = str(g("title_en") or "")
+        va = g("variation_attributes") if isinstance(g("variation_attributes"), list) else []
+        self.variant = "، ".join(
+            f"{(v.get('attribute') or {}).get('title', '')}: {(v.get('value') or {}).get('title', '')}"
+            for v in va if isinstance(v, dict) and (v.get("value") or {}).get("title"))
         self.price = to_num(g("price"))
         self.stock = to_num(g("stock"))
         self.wstock = to_num(g("warehouse_stock"))
@@ -119,8 +182,41 @@ class Prod:
     def key(self) -> str:
         return self.sku or self.id
 
+    def discount_state(self, now: str):
+        """None (no discount) | 'scheduled' | 'active' | 'expired'. `now` = 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'."""
+        if not self.sp or self.sp <= 0:
+            return None
+        now = str(now)
+        full = len(now) > 10
+        cur = now[:19] if full else now[:10]
+        st, en = self.sp_start[:19], self.sp_end[:19]
+        if full:
+            st = st + " 00:00:00" if len(st) == 10 else st
+            en = en + " 23:59:59" if len(en) == 10 else en
+        else:
+            st, en = st[:10], en[:10]
+        if st and cur < st:
+            return "scheduled"
+        if en and cur > en:
+            return "expired"
+        return "active"
+
     def has_discount(self, today: str) -> bool:
-        return self.sp is not None and self.sp > 0 and (not self.sp_end or self.sp_end[:10] >= today)
+        return self.discount_state(today) == "active"
+
+    def eff_price(self, now: str):
+        """Price the customer really pays: active special price, else the base price."""
+        return self.sp if self.has_discount(now) else self.price
+
+    eff = eff_price
+
+    def buybox_state(self, now: str = ""):
+        if self.is_bb:
+            return "win"
+        return "lose" if self.buy_box is not None else None
+
+    def lose_bb(self, today: str) -> bool:
+        return self.buybox_state(today) == "lose"
 
     def item(self, price=None, stock=None, **extra) -> dict:
         """PATCH item: id|sku + stock + price are mandatory in the API."""
@@ -139,7 +235,8 @@ def norm_prod(raw: dict, i: int = 0) -> Prod:
 
 
 FILTERS = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"),
-           ("low", "کم‌موجودی"), ("oos", "ناموجود"), ("disc", "دارای تخفیف"), ("lostbb", "باخته در باکس‌باکس")]
+           ("low", "کم‌موجودی"), ("oos", "ناموجود"), ("disc", "دارای تخفیف"),
+           ("bbwin", "بای‌باکس دارم"), ("bblose", "بای‌باکس ندارم")]
 
 
 def match(o: Prod, key: str, low: int, today: str) -> bool:
@@ -157,9 +254,24 @@ def match(o: Prod, key: str, low: int, today: str) -> bool:
         return o.stock is not None and o.stock <= 0
     if key == "disc":
         return o.has_discount(today)
-    if key == "lostbb":
-        return o.buy_box is not None and not o.is_bb
+    if key == "bbwin":
+        return o.buybox_state(today) == "win"
+    if key == "bblose":
+        return o.buybox_state(today) == "lose"
     return True
+
+
+class ProdIndex:
+    """Find the product behind an order item: product_number, then vendor_product_info_id, id, sku."""
+    def __init__(self, prods):
+        self.pn = {p.pnum: p for p in prods or [] if p.pnum}
+        self.vpi = {p.vpi: p for p in prods or [] if p.vpi}
+        self.id = {p.id: p for p in prods or [] if p.id}
+        self.sku = {p.sku: p for p in prods or [] if p.sku}
+
+    def find(self, it: dict):
+        return (self.pn.get(str(it.get("product_number") or "")) or self.vpi.get(str(it.get("vendor_product_info_id") or ""))
+                or self.id.get(str(it.get("inventory_product_id") or "")) or self.sku.get(str(it.get("sku") or "")))
 
 
 def plan_bulk(prods: List[Prod], pct=None, amt=None, stock=None):
@@ -285,13 +397,17 @@ def norm_order(raw: dict, i: int = 0) -> Order:
 
 def event_line(e: dict) -> str:
     t = str(e.get("event_type") or "")
-    num = e.get("order_number")
     items = e.get("items") or []
     total = sum(to_num(it.get("final_price")) or 0 for it in items if isinstance(it, dict))
-    extra = f" | {len(items)} items | {int(total):,}" if t == "NEW_ORDER" and items else ""
+    ea = str(e.get("event_at") or "")
+    msg = f"{EVENT_FA.get(t, t)} | سفارش {e.get('order_number')}"
+    if t == "NEW_ORDER" and items:
+        msg += f" | {len(items)} قلم | {int(total):,} تومان"
     if t == "CHANGE_STATUS":
-        extra = f" -> {e.get('new_status')}"
-    return f"{t} order {num} at {e.get('event_at')}{extra}"
+        msg += f" | وضعیت جدید: {status_fa(e.get('new_status'))}"
+    if ea:
+        msg += f" | {jdate(ea)} {ea[11:16]}"
+    return msg
 
 
 # ---------------- Excel report ----------------
@@ -377,8 +493,7 @@ SALES_COLS = [("order_number", "شماره سفارش"), ("date", "تاریخ م
 
 
 def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None, low: int = 3) -> bytes:
-    by_pn = {p.pnum: p for p in (prods or []) if p.pnum}
-    by_id = {p.id: p for p in (prods or []) if p.id}
+    ix = ProdIndex(prods)
     rows, by_sku, by_day = [], {}, {}
     for o in orders:
         num = o.get("order_number")
@@ -392,7 +507,7 @@ def build_sales_workbook(orders: List[dict], prods: Optional[List[Prod]] = None,
         for it in (o.get("items") or [{}]):
             q = to_num(it.get("quantity")) or 0
             cq = to_num(it.get("canceled_quantity")) or 0
-            p = by_pn.get(str(it.get("product_number") or "")) or by_id.get(str(it.get("vendor_product_info_id") or ""))
+            p = ix.find(it)
             sku = it.get("sku") or (p.sku if p else "") or ""
             fp = to_num(it.get("final_price")) or 0
             row = {"order_number": num, "date": day, "jdate": jdate(created), "time": created[11:19],
@@ -440,3 +555,207 @@ def products_export_rows(prods: List[Prod]):
              "special_start": p.sp_start, "special_end": p.sp_end, "special_stock": p.sp_stock, "buy_box": p.buy_box, "is_buy_box": p.is_bb,
              "ref_min": p.ref_lo, "ref_max": p.ref_hi} for p in prods]
     return cols, rows
+
+
+# ---------------- manual buy-box undercut (preview first) ----------------
+def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, today: str, selected_only: bool):
+    """Price just below the buy-box price. Returns (rows, skipped); row = {o, np, why, item, kind}."""
+    sel = [o for o in prods if o.sel]
+    base = sel if (selected_only and sel) else [o for o in prods if o.buybox_state(today) == "lose"]
+    rows, skipped = [], 0
+    for o in base:
+        e = o.eff_price(today)
+        if o.buy_box is None or e is None or o.stock is None or o.price is None:
+            skipped += 1
+            continue
+        np_ = int(o.buy_box - delta)
+        lowest = reprice_floor(o, floor or None)
+        why = ""
+        if o.blacklist:
+            why = "در لیست سیاه"
+        elif o.active is False or o.stock <= 0:
+            why = "غیرفعال/ناموجود"
+        elif np_ <= 0:
+            why = "قیمت نامعتبر"
+        elif np_ < lowest:
+            why = "زیر حداقل مجاز"
+        elif np_ >= e:
+            why = "قیمت شما از قبل پایین‌تر است"
+        elif maxdrop and (e - np_) / e * 100 > maxdrop:
+            why = "افت قیمت بیش از حد مجاز"
+        kind = "special" if o.has_discount(today) else "base"
+        item = None
+        if not why:
+            if kind == "special":
+                extra = {"special_price": np_, "special_price_start_at": o.sp_start[:10], "special_price_end_at": o.sp_end[:10]}
+                if o.sp_stock is not None:
+                    extra["special_price_stock"] = int(o.sp_stock)
+                item = o.item(**extra)
+            else:
+                item = o.item(price=np_)
+        rows.append({"o": o, "np": np_, "why": why, "item": item, "kind": kind})
+    return rows, skipped
+
+
+# ---------------- undo journal ----------------
+_SP_KEYS = ("special_price", "special_price_start_at", "special_price_end_at", "special_price_stock")
+
+
+def snap(p: Prod, today: str = "") -> dict:
+    """State of a product BEFORE a change (what Undo will restore)."""
+    today = today or datetime.date.today().isoformat()
+    return {"id": p.id, "sku": p.sku, "key": p.key, "name": p.name, "price": p.price, "stock": p.stock,
+            "sp": p.sp, "sp_start": p.sp_start[:10], "sp_end": p.sp_end[:10], "sp_stock": p.sp_stock,
+            "disc": p.discount_state(today) in ("active", "scheduled")}
+
+
+def _changed(b: dict, it: dict) -> bool:
+    if "price" in it and b.get("price") is not None and int(it["price"]) != int(b["price"]):
+        return True
+    if "stock" in it and b.get("stock") is not None and int(it["stock"]) != int(b["stock"]):
+        return True
+    if "special_price" in it:
+        same = (b.get("sp") is not None and int(it["special_price"]) == int(b["sp"])
+                and str(it.get("special_price_start_at") or b["sp_start"])[:10] == b["sp_start"]
+                and str(it.get("special_price_end_at") or b["sp_end"])[:10] == b["sp_end"]
+                and (it.get("special_price_stock") is None or b.get("sp_stock") is None
+                     or int(it["special_price_stock"]) == int(b["sp_stock"])))
+        return not same
+    return False
+
+
+def make_undo_entry(label: str, pairs) -> dict:
+    """pairs: [(snap_before, patch_item)]. Items that change nothing are not recorded."""
+    items = []
+    for b, it in pairs:
+        if not _changed(b, it):
+            continue
+        after = {k: v for k, v in it.items() if k in ("price", "stock") or k in _SP_KEYS}
+        items.append({"key": b["key"], "id": b["id"], "sku": b["sku"], "name": b["name"], "before": b, "after": after})
+    now = datetime.datetime.now()
+    return {"id": now.strftime("%Y%m%d%H%M%S%f"), "t": now.strftime("%Y-%m-%d %H:%M:%S"), "label": label,
+            "n": len(items), "items": items}
+
+
+def revert_items(entry: dict, today=None):
+    """-> (patch_items, removals, skipped). removals = new discounts that can only be ended, not deleted."""
+    today = today or datetime.date.today()
+    y = (today - datetime.timedelta(days=1)).isoformat()
+    out, rem, skipped = [], 0, 0
+    for x in entry.get("items", []):
+        b, a = x["before"], x.get("after", {})
+        if b.get("price") is None or b.get("stock") is None:
+            skipped += 1
+            continue
+        r = {"sku": b["sku"]} if b.get("sku") else {"id": b["id"]}
+        r["price"], r["stock"] = int(b["price"]), int(b["stock"])
+        if any(k in a for k in _SP_KEYS):
+            if b.get("disc") and b.get("sp"):
+                r["special_price"] = int(b["sp"])
+                r["special_price_start_at"], r["special_price_end_at"] = b["sp_start"], b["sp_end"]
+                if b.get("sp_stock") is not None:
+                    r["special_price_stock"] = int(b["sp_stock"])
+            else:
+                rem += 1
+                r["special_price"] = int(a.get("special_price") or 1)
+                r["special_price_start_at"] = r["special_price_end_at"] = y
+        out.append(r)
+    return out, rem, skipped
+
+
+def patch_outcome(items: List[dict], results: List[dict]):
+    """[(ok, message)] aligned with `items`; matches by sku/id, falls back to position."""
+    res = list(results or [])
+    out = [(True, "")] * len(items)
+    def msg(r):
+        return "; ".join(str(m) for m in (r.get("messages") or [])) or "failed"
+    matched = False
+    for i, it in enumerate(items):
+        for r in res:
+            if (r.get("sku") and r.get("sku") == it.get("sku")) or (r.get("id") and r.get("id") == it.get("id")):
+                out[i] = (False, msg(r)) if r.get("status") is False else (True, "")
+                matched = True
+                break
+    if not matched and len(res) == len(items):
+        out = [(False, msg(r)) if r.get("status") is False else (True, "") for r in res]
+    return out
+
+
+def describe_change(x: dict) -> str:
+    """One Persian line: what pressing Undo will do for this product (current -> restored)."""
+    a, b = x.get("after", {}), x["before"]
+    parts = []
+    if "price" in a and b.get("price") is not None:
+        parts.append(f"قیمت {int(a['price']):,} به {int(b['price']):,}")
+    if "stock" in a and b.get("stock") is not None:
+        parts.append(f"موجودی {int(a['stock'])} به {int(b['stock'])}")
+    if "special_price" in a:
+        parts.append(f"تخفیف {int(a['special_price']):,} به " + (f"{int(b['sp']):,}" if b.get("disc") and b.get("sp") else "بدون تخفیف"))
+    return f"{x.get('name', '')[:40]}: " + " · ".join(parts)
+
+
+class UndoStore:
+    MAX_ENTRIES = 20
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def history(self) -> list:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            return [e for e in d if isinstance(e, dict) and "items" in e and "n" in e] if isinstance(d, list) else []
+        except Exception:
+            return []
+
+    def _save(self, data: list):
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data[-self.MAX_ENTRIES:], f, ensure_ascii=False)
+        os.replace(tmp, self.path)
+
+    def push(self, entry: dict):
+        if not entry or not entry.get("n"):
+            return
+        self._save(self.history() + [entry])
+
+    def last(self):
+        h = self.history()
+        return h[-1] if h else None
+
+    def get(self, eid: str):
+        return next((e for e in self.history() if e.get("id") == eid), None)
+
+    def remove(self, eid: str):
+        self._save([e for e in self.history() if e.get("id") != eid])
+
+    def replace(self, entry: dict):
+        self._save([entry if e.get("id") == entry.get("id") else e for e in self.history()])
+
+
+def run_undo(client, vid: str, store: UndoStore, entry_id=None):
+    """Send the restore items. Entries fully restored are removed; failed products stay for a retry."""
+    e = store.get(entry_id) if entry_id else store.last()
+    if not e:
+        return None
+    items, rem, skipped = revert_items(e)
+    if not items:
+        store.remove(e["id"])
+        return {"ok": 0, "bad": [], "restored": [], "removed": rem, "skipped": skipped}
+    out = patch_outcome(items, client.patch_products(vid, items))
+    ok, bad, restored = 0, [], []
+    for it, (good, m) in zip(items, out):
+        if good:
+            ok += 1
+            restored.append(it)
+        else:
+            bad.append((it.get("sku") or it.get("id"), m))
+    if not bad:
+        store.remove(e["id"])
+    else:
+        failed = {k for k, _ in bad}
+        e["items"] = [x for x in e["items"] if (x["before"].get("sku") or x["before"].get("id")) in failed]
+        e["n"] = len(e["items"])
+        store.replace(e)
+    return {"ok": ok, "bad": bad, "restored": restored, "removed": rem, "skipped": skipped}
