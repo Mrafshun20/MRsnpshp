@@ -5,7 +5,6 @@ What it does while it runs:
   1. Watches new orders/cancellations (order events, cursor kept between runs) -> log + sound + orders_log.csv
   2. Applies price/stock/discount changes from prices.csv whenever you save that file
   3. Writes a daily Excel sales report (reports\\sales-YYYY-MM-DD.xlsx) with Jalali dates and low-stock sheet
-  4. Keeps a journal of every change it makes (undo.json) - `--undo` reverts the latest one
 Run with --help for options.
 """
 import argparse
@@ -28,7 +27,7 @@ APP_DIR = os.environ.get("SNAPP_BOT_DIR") or (os.path.dirname(sys.executable) if
 def P(name): return os.path.join(APP_DIR, name)
 CFG, STATE, PRICES = P("config.json"), P("state.json"), P("prices.csv")
 EXPORT, ORDERS_LOG, REPORTS = P("prices_export.csv"), P("orders_log.csv"), P("reports")
-UNDO = P("undo.json")             # journal of changes made by this program (shared with the GUI) -> "Undo"
+REPRICE_LOG = P("reprice_log.csv")
 
 DEFAULT = {
     "user_agent": "", "token": "", "vendor_id": "",
@@ -39,6 +38,13 @@ DEFAULT = {
     "beep": True,
     "prices_dry_run": True,           # true = only show what prices.csv WOULD change; set false to apply
     "max_price_change_pct": 50,       # safety: rows changing a price by more than this % are skipped
+    "reprice_mode": "off",            # buy-box repricer: off | dry (log only) | live
+    "reprice_interval_min": 10,
+    "reprice_delta": 5000,            # toman below the buy-box price
+    "reprice_max_discount_pct": 45,   # never go lower than list price minus this %
+    "reprice_max_drop_pct": 15,       # skip a single move larger than this % (bad data guard)
+    "reprice_days": 30,               # length of a newly created discount
+    "reprice_max_per_day": 4,         # max automatic changes per product per day
 }
 log = logging.getLogger("bot")
 
@@ -203,7 +209,7 @@ class Bot:
         by_sku = {p.sku: p for p in prods if p.sku}
         by_id = {p.id: p for p in prods}
         limit = float(self.cfg.get("max_price_change_pct", 50))
-        items, snaps, lines, skipped = [], [], [], 0
+        items, lines, skipped = [], [], 0
         for r in rows:
             p = by_sku.get(r.get("sku", "")) if r.get("sku") else None
             if p is None and r.get("id"):
@@ -238,22 +244,13 @@ class Bot:
                         extra["special_price_stock"] = int(ss)
             if np_ != p.price or ns != p.stock or extra:
                 items.append(p.item(np_, ns, **extra))
-                snaps.append(L.snap(p))
                 lines.append(f"{p.key}: price {int(p.price or 0)}->{np_}, stock {int(p.stock or 0)}->{ns}" + (", discount" if extra else ""))
         if dry:
             log.info("prices.csv (DRY RUN - nothing sent): %d changes, %d skipped. Set \"prices_dry_run\": false in config.json to apply.", len(items), skipped)
             for ln in lines[:30]:
                 log.info("  would change %s", ln)
         elif items:
-            out = L.patch_outcome(items, self.client.patch_products(self.vid, items))
-            bad = [(L.item_key(it), m) for it, (good, m) in zip(items, out) if not good]
-            ok = len(items) - len(bad)
-            done = [(sn, it) for sn, it, (good, _m) in zip(snaps, items, out) if good]
-            if done:
-                try:
-                    L.UndoStore(UNDO).push(L.make_undo_entry("prices.csv", done))
-                except Exception as e:
-                    log.warning("could not save undo journal: %s", e)
+            ok, bad = L.summarize_patch(self.client.patch_products(self.vid, items))
             log.info("prices.csv applied: %d updated, %d failed, %d skipped", ok, len(bad), skipped)
             for k, m in bad[:20]:
                 log.warning("  FAILED %s: %s", k, m)
@@ -262,18 +259,60 @@ class Bot:
         self.state[hkey] = h
         self.save_state()
 
-    def undo_last(self):
-        """Put the newest change (made by the GUI or by prices.csv) back as it was."""
-        r = L.run_undo(self.client, self.vid, L.UndoStore(UNDO))
-        if r is None:
-            log.info("Nothing to undo.")
-            return 0
-        log.info("Undo: %d restored, %d failed.", r["ok"], len(r["bad"]))
-        for k, m in r["bad"][:20]:
-            log.warning("  FAILED %s: %s", k, m)
-        if r["removals"]:
-            log.warning("Undo: %d newly created discount(s) were set to an already-ended window; check them in the seller panel.", r["removals"])
-        return 0 if not r["bad"] else 1
+    # ---- 2b) buy-box repricer (special_price = buy_box - delta)
+    def reprice(self):
+        mode = str(self.cfg.get("reprice_mode", "off")).lower()
+        if mode not in ("dry", "live"):
+            return
+        floors = {}
+        if os.path.exists(PRICES):
+            for r in self.read_csv(PRICES):
+                v = L.to_num(r.get("min_price"))
+                if v:
+                    for k in (r.get("sku"), r.get("id")):
+                        if k:
+                            floors[k] = v
+        today = datetime.date.today().isoformat()
+        st = self.state.get("reprice_n") or {}
+        if st.get("date") != today:
+            st = {"date": today, "n": {}}
+        prods = self.products()
+        changes, skips = L.plan_reprice(
+            prods, today, float(self.cfg.get("reprice_delta", 5000)), floors,
+            float(self.cfg.get("reprice_max_discount_pct", 45)), float(self.cfg.get("reprice_max_drop_pct", 15)),
+            int(self.cfg.get("reprice_days", 30)), st["n"], int(self.cfg.get("reprice_max_per_day", 4)))
+        for o, why in skips[:20]:
+            log.info("reprice skip %s: %s", o.key, why)
+        if not changes:
+            log.info("reprice: nothing to change (%d skipped)", len(skips))
+            return
+        rows = []
+        if mode == "dry":
+            for o, it, old, new in changes[:30]:
+                log.info("reprice (DRY RUN) %s: %d -> %d  (buy box %d)", o.key, old, new, int(o.buy_box))
+                rows.append((o, old, new, "dry"))
+        else:
+            res = L.summarize_patch(self.client.patch_products(self.vid, [c[1] for c in changes]))
+            ok, bad = res
+            badk = {k for k, _ in bad}
+            log.info("reprice applied: %d updated, %d failed", ok, len(bad))
+            for k, m in bad[:20]:
+                log.warning("  FAILED %s: %s", k, m)
+            for o, it, old, new in changes:
+                if o.key in badk:
+                    continue
+                st["n"][o.key] = st["n"].get(o.key, 0) + 1
+                rows.append((o, old, new, "live"))
+                log.info("reprice %s: %d -> %d  (buy box %d)", o.key, old, new, int(o.buy_box))
+            self.state["reprice_n"] = st
+            self.save_state()
+        new_file = not os.path.exists(REPRICE_LOG)
+        with open(REPRICE_LOG, "a", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["time", "mode", "key", "title", "old_price", "new_price", "buy_box"])
+            for o, old, new, m in rows:
+                w.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), m, o.key, o.name, old, new, int(o.buy_box)])
 
     def export_products(self):
         prods = self.products()
@@ -329,7 +368,7 @@ class Bot:
         keep_awake()
         log.info("Bot started. Store %s. Orders check every %ss. prices_dry_run=%s",
                  self.vid, self.cfg.get("events_interval_sec"), self.cfg.get("prices_dry_run"))
-        last_ev = 0.0
+        last_ev = last_rp = 0.0
         while not self.stop_ev.is_set():
             now = time.monotonic()
             try:
@@ -337,6 +376,10 @@ class Bot:
                     self.safe("events", self.poll_events)
                     last_ev = now
                 self.safe("prices", self.sync_prices)
+                if str(self.cfg.get("reprice_mode", "off")).lower() in ("dry", "live") and (
+                        once or now - last_rp >= max(60, 60 * int(self.cfg.get("reprice_interval_min", 10)))):
+                    self.safe("reprice", self.reprice)
+                    last_rp = now
                 self.safe("report", self.report)
             except core.AuthError:
                 return 2
@@ -353,7 +396,6 @@ def main(argv=None):
     ap.add_argument("--once", action="store_true", help="run one pass and exit")
     ap.add_argument("--export", action="store_true", help="write prices_export.csv with all products")
     ap.add_argument("--report", action="store_true", help="write the Excel sales report now")
-    ap.add_argument("--undo", action="store_true", help="revert the most recent price/stock/discount change")
     ap.add_argument("--setup", action="store_true", help="re-run first-time setup")
     ap.add_argument("--install-startup", action="store_true", help="start with Windows")
     ap.add_argument("--uninstall-startup", action="store_true")
@@ -382,8 +424,6 @@ def main(argv=None):
         if a.report:
             bot.report(force=True)
             return 0
-        if a.undo:
-            return bot.undo_last()
         return bot.run(once=a.once)
     except core.AuthError as e:
         log.error("Token rejected: %s", e)
