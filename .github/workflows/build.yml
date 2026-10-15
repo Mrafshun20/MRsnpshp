@@ -5,7 +5,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,43 +15,53 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Unit tests (logic only)
+        run: python -m unittest discover -s tests
       - name: Install deps
         run: |
           sudo apt-get update
           sudo apt-get install -y git zip unzip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev libltdl-dev
-          pip install --upgrade pip buildozer cython virtualenv setuptools
-      - name: Build
+          pip install --upgrade pip
+          # Cython is pinned: newer Cython releases break the Kivy 2.3.0 / pyjnius recipes
+          pip install buildozer==1.5.0 "cython==0.29.36" virtualenv setuptools
+      - name: Build APK
         run: |
-          set +e
-          buildozer -v android debug > build.log 2>&1
-          echo $? > code.txt
-          exit 0
-      - name: Show errors
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee build.log
+      - name: Locate APK
         run: |
-          grep -n -iE "error|failed|not found|exception" build.log | tail -n 40 || true
-          echo "=========== LAST LINES ==========="
-          tail -n 40 build.log
-          test "$(cat code.txt)" = "0"
-      - name: Rename APK
-        if: success()
-        run: cp bin/*.apk SnappShop.apk
-      - name: Upload APK
-        if: success()
+          ls -lh bin/
+          cp "$(ls bin/*.apk | head -n1)" SnappShop.apk
+      # The APK itself (GitHub wraps every artifact in a .zip; the Release below is a direct .apk download)
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SnappShop-APK
+          name: SnappShop-Android-APK
           path: SnappShop.apk
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-      - name: Publish APK to Releases
-        if: success()
+          if-no-files-found: error
+      - name: Publish APK to Releases (direct download, no zip)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Latest build
-          make_latest: true
           files: SnappShop.apk
+      # Only when something failed: key error lines on the run page + the full log as an artifact
+      - name: Summarize errors
+        if: failure()
+        run: |
+          {
+            echo '### Build failed - key lines'
+            echo '```'
+            grep -n -iE "error|failed|not found|exception|aidl" build.log | tail -n 40 || true
+            echo '```'
+            echo '### Last lines'
+            echo '```'
+            tail -n 40 build.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload build log (failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
