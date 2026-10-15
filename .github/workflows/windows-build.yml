@@ -44,4 +44,3 @@ jobs:
           tag_name: latest
           name: Latest build
           files: dist/SnappShop.exe
-          
