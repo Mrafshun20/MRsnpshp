@@ -350,7 +350,7 @@ class ProdCard(Bg):
         cb = CheckBox(size_hint=(None, None), size=(dp(34), dp(34)), active=o.sel)
         cb.bind(active=self._sel)
         self.add_widget(Bg(color=ACC if o.is_bb else (RED if o.lose_bb(datetime.date.today().isoformat()) else EDGE),
-                           radius=2, size_hint_y=None, height=dp(3)))
+                           radius=2, size_hint_y=None, height=dp(4)))
         tap = Tap(orientation="vertical", size_hint_y=None)
         tap.bind(minimum_height=tap.setter("height"))
         tap.add_widget(lab(o.name, ACC if o.url() else TXT, 14, bold=True))
@@ -359,12 +359,19 @@ class ProdCard(Bg):
         top.add_widget(tap)
         top.add_widget(cb)
         self.add_widget(top)
-        self.add_widget(lab(f"قیمت: {n(o.price)}     موجودی: {n(o.stock)}     انبار اسنپ: {n(o.wstock)}", size=13))
         today = datetime.date.today().isoformat()
+        eff = o.eff_price(today)
+        self.add_widget(lab(f"{n(eff)} تومان", TXT, 19, bold=True))
+        self.add_widget(lab(f"موجودی: {n(o.stock)}     انبار اسنپ: {n(o.wstock)}", MUT, 12))
         if o.has_discount(today):
-            self.add_widget(lab(f"قیمت با تخفیف: {n(o.sp)}  تا {L.jdate(o.sp_end)}", MUT, 12))
+            self.add_widget(lab(f"قیمت پایه: {n(o.price)}   ·   تخفیف تا {L.jdate(o.sp_end)}", AMB, 12))
         if o.buy_box is not None:
-            self.add_widget(lab(f"قیمت بای‌باکس: {n(o.buy_box)}" + ("  (برنده)" if o.is_bb else f"  (اختلاف: {n((o.sp if o.has_discount(today) else o.price) - o.buy_box)})"), MUT, 12))
+            if o.is_bb:
+                bb_txt, bb_col = f"بای‌باکس: {n(o.buy_box)} تومان   ✓ برنده", GRN
+            else:
+                gap = "" if eff is None else f"   (اختلاف: {n(eff - o.buy_box)} تومان)"
+                bb_txt, bb_col = f"بای‌باکس: {n(o.buy_box)} تومان{gap}", RED
+            self.add_widget(lab(bb_txt, bb_col, 13, bold=True))
         bs = []
         if o.active is False: bs.append(badge("غیرفعال", "r"))
         if o.stock is not None and o.stock <= 0: bs.append(badge("ناموجود", "o"))
@@ -546,12 +553,7 @@ class SnappShopApp(App):
                         lab("قیمت را همیشه ۵٬۰۰۰ تومان زیر قیمت نفر دوم نگه می‌دارد؛ هر ۱۰ دقیقه. اگر بای‌باکس را باخته باشی قیمت پایین می‌آید، و اگر با اختلاف زیاد برنده باشی (نفر دوم گران کرده) قیمت بالا می‌رود تا فاصله حفظ شود. وقتی بای‌باکس دست توست، قیمت هرگز پایین آورده نمی‌شود. کف قیمت: بیشترین مقدار از «ستون min_price در prices.csv»، حد پایین قیمت مرجع اسنپ‌شاپ و ۴۵٪ زیر قیمت پایه. هر حرکت نزولی حداکثر ۱۵٪ و هر حرکت صعودی حداکثر ۱۵٪ در هر دور. حالت آزمایشی فقط در گزارش می‌نویسد. هر تغییر در «بازگردانی تغییرات» (تب محصولات) ثبت می‌شود.", MUT, 11))
             c_file = card("قیمت از روی فایل (Excel)", self.dry_btn, bb3,
                           lab("۱) «ساخت فایل قیمت‌ها» را بزنید. ۲) فایل prices_export.csv را با نام prices.csv کپی کنید. ۳) ستون‌های price و stock و special_price را در Excel ویرایش و ذخیره کنید. ۴) اول در حالت آزمایشی نتیجه را در گزارش ببینید، بعد حالت آزمایشی را خاموش کنید. تغییر قیمت بیش از ۵۰٪ برای جلوگیری از اشتباه تایپی رد می‌شود.", MUT, 11))
-            self.ac_btn = RBtn("", ACC2)
-            self._ac_text()
-            self.ac_btn.bind(on_release=lambda *_: self.toggle_ac())
-            c_ac = card("تأیید خودکار سفارش‌های باز", self.ac_btn,
-                        lab("سفارش‌هایی که هنوز تأیید نشده‌اند (باز و لغونشده) را خودکار تأیید می‌کند؛ همراه با بررسی دوره‌ای سفارش‌ها.\nتوجه: API اسنپ‌شاپ (v2.1.2) فعلاً امکان تأیید سفارش نمی‌دهد؛ این گزینه برای روزی آماده است که اسنپ‌شاپ این قابلیت را به API اضافه کند.", MUT, 11))
-            cards_auto = [c_bot, c_rp, c_ac] + ([c_file] if self.desktop else []) + [card("فایل‌ها", bb4, bb6, *([bb5] if self.desktop else []))]
+            cards_auto = [c_bot, c_rp] + ([c_file] if self.desktop else []) + [card("فایل‌ها", bb4, bb6, *([bb5] if self.desktop else []))]
             if os.name == "nt":
                 self.win_btn = RBtn("", ACC2)
                 self._win_text()
@@ -1504,17 +1506,6 @@ class SnappShopApp(App):
         self.bot.jsave(self.bot.CFG, c)
         self._rp_text()
         self.log("تعدیل قیمت: " + self.RP_FA[c["reprice_mode"]], "err" if c["reprice_mode"] == "live" else "ok")
-
-    def _ac_text(self):
-        on = bool(self.bot.jload(self.bot.CFG, {}).get("auto_confirm_orders", False))
-        self.ac_btn.set_text("تأیید خودکار سفارش‌ها: " + ("روشن" if on else "خاموش"))
-
-    def toggle_ac(self):
-        c = self.bot.jload(self.bot.CFG, {})
-        c["auto_confirm_orders"] = not c.get("auto_confirm_orders", False)
-        self.bot.jsave(self.bot.CFG, c)
-        self._ac_text()
-        self.log("تأیید خودکار سفارش‌ها " + ("روشن شد." if c["auto_confirm_orders"] else "خاموش شد."), "ok")
 
     def _win_text(self):
         self.win_btn.set_text("اجرا با روشن شدن ویندوز: " + ("بله" if self.cfg.get("winstart") else "خیر"))

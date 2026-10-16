@@ -44,7 +44,6 @@ DEFAULT = {
     "reprice_max_discount_pct": 45,   # never go lower than list price minus this %
     "reprice_max_drop_pct": 15,       # skip a single downward move larger than this % (bad data guard)
     "reprice_max_rise_pct": 15,       # skip a single upward move larger than this % (bad data guard)
-    "auto_confirm_orders": False,     # auto-confirm open orders (needs API support; see Client.confirm_order)
     "reprice_days": 30,               # length of a newly created discount
     "reprice_max_per_day": 4,         # max automatic changes per product per day
 }
@@ -333,37 +332,6 @@ class Bot:
             for o, old, new, m in rows:
                 w.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), m, o.key, o.name, old, new, int(o.buy_box)])
 
-    # ---- 2c) auto-confirm open orders
-    def auto_confirm(self):
-        """Confirm open (unconfirmed, not canceled) orders automatically.
-
-        NOTE: the SnappShop automation API (v2.1.2) currently exposes no
-        order-confirmation endpoint, so Client.confirm_order() raises
-        NotImplementedError until SnappShop documents one. Detection, toggle
-        and loop wiring are ready; only the endpoint call itself is pending."""
-        if not self.cfg.get("auto_confirm_orders"):
-            self._ac_unsupported = False
-            return
-        if getattr(self, "_ac_unsupported", False):
-            return
-        try:
-            orders = self.client.orders(self.vid)
-        except Exception as e:
-            log.warning("تأیید خودکار سفارش: دریافت سفارش‌ها ناموفق بود (%s)", e)
-            return
-        todo = [o for o in orders
-                if str(o.get("order_status") or "").upper() not in ("CONFIRMED", "CANCELED", "CANCELLED")]
-        if not todo:
-            return
-        try:
-            for o in todo:
-                self.client.confirm_order(self.vid, o.get("order_number"))
-        except NotImplementedError as e:
-            self._ac_unsupported = True
-            log.warning("تأیید خودکار سفارش روشن است ولی API اسنپ‌شاپ (v2.1.2) امکان تأیید سفارش ندارد: %s", e)
-            return
-        log.info("تأیید خودکار: %d سفارش باز تأیید شد", len(todo))
-
     def export_products(self):
         prods = self.products()
         cols, rows = L.products_export_rows(prods)
@@ -424,7 +392,6 @@ class Bot:
             try:
                 if once or now - last_ev >= max(15, int(self.cfg.get("events_interval_sec", 60))):
                     self.safe("events", self.poll_events)
-                    self.safe("autoconfirm", self.auto_confirm)
                     last_ev = now
                 self.safe("prices", self.sync_prices)
                 if str(self.cfg.get("reprice_mode", "off")).lower() in ("dry", "live") and (

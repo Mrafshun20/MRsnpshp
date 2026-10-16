@@ -139,17 +139,6 @@ class Client:
         r = self.request("GET", f"vendors/{vid}/orders/{number}")
         return r.get("data", r) if isinstance(r, dict) else r
 
-    def confirm_order(self, vid, number):
-        """Confirm (accept) an open order.
-
-        NOT IMPLEMENTED: the official SnappShop vendor automation API (v2.1.2)
-        exposes no order-confirmation endpoint (orders are read-only: list/detail/events).
-        This method is the single seam — wire the real endpoint here as soon as
-        SnappShop documents it, and Bot.auto_confirm() will just work."""
-        raise NotImplementedError(
-            "no order-confirm endpoint in SnappShop automation API v2.1.2; "
-            "confirm the order in the vendor panel")
-
     def events(self, vid, cursor=None, max_pages=1000):
         """Order events stream. Returns (events, last_cursor). Send last_cursor next time."""
         endpoint, params = f"vendors/{vid}/orders/events", {"cursor": cursor}

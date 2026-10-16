@@ -224,7 +224,8 @@ class Filters2(unittest.TestCase):
         both = [p.id for p in ps if L.match_all(p, {"bblose", "active"}, 3, t)]
         self.assertEqual(both, ["z681wQ"])                       # loses buy box AND is active (z2 is inactive)
         self.assertEqual(L.FILTER_EXCLUSIVE["bbwin"], "bblose")
-        self.assertEqual(L.norm_prod(dict(P1, parent_product_number=758717427)).url(), "https://snappshop.ir/product/758717427")
+        self.assertEqual(L.norm_prod(dict(P1, parent_product_number=758717427)).url(), "https://snappshop.ir/product/snp-758717427")
+        self.assertEqual(L.norm_prod(dict(P1, parent_product_number="snp-758717427")).url(), "https://snappshop.ir/product/snp-758717427")
         self.assertEqual(L.norm_prod(P1).url(), "")
 
     def test_plan_only(self):
@@ -284,6 +285,15 @@ class RepriceFollowUp(unittest.TestCase):
         p = self._mk(is_buy_box=True, buy_box=6150000, price=6145000)
         rows, skipped = L.plan_undercut([p], 5000, 0, 15, "2026-10-15", False, only=[p])
         self.assertEqual(rows, [])
+
+    def test_floor_uses_discounted_price_when_active(self):
+        # P1 has an active 40%-ish discount on 2026-10-15: eff = 3,390,000
+        p = L.norm_prod(P1)
+        self.assertEqual(p.eff_price("2026-10-15"), 3390000)
+        self.assertEqual(L.reprice_floor(p, None, 45.0, "2026-10-15"), int(3390000 * 0.55 + 0.999))
+        # no discount -> base price is the reference
+        q = self._mk()
+        self.assertEqual(L.reprice_floor(q, None, 45.0, "2026-10-15"), int(6890000 * 0.55 + 0.999))
 
 
 if __name__ == "__main__":

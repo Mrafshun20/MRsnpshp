@@ -217,8 +217,12 @@ class Prod:
         return "lose" if self.buy_box is not None else None
 
     def url(self) -> str:
-        """Product page on the SnappShop website (parent_product_number = the number shown on the site)."""
-        return PRODUCT_URL.format(n=self.parent) if self.parent else ""
+        """Product page on the SnappShop website. SnappShop addresses products as
+        https://snappshop.ir/product/snp-<parent_product_number>."""
+        n = (self.parent or "").strip()
+        if n and not n.lower().startswith("snp-"):
+            n = "snp-" + n
+        return PRODUCT_URL.format(n=n) if n else ""
 
     def lose_bb(self, today: str) -> bool:
         return self.buybox_state(today) == "lose"
@@ -330,16 +334,20 @@ def plan_discount(prods: List[Prod], pct: float, start: str, end: str, dstock=No
     return out, skipped
 
 
-def reprice_floor(o: Prod, explicit=None, max_disc_pct=45.0):
+def reprice_floor(o: Prod, explicit=None, max_disc_pct=45.0, today=None):
     """Lowest special_price the bot may ever set: the highest of (your min_price, SnappShop's
-    reference lower margin, list price minus max_disc_pct %)."""
+    reference lower margin, effective price minus max_disc_pct %).
+
+    The base for the max_disc_pct computation is the discounted (effective) price when a
+    discount is active, otherwise the base list price."""
+    base = o.eff_price(today) if today else o.price
     f = [0.0]
     if explicit:
         f.append(float(explicit))
     if o.ref_lo:
         f.append(float(o.ref_lo))
-    if o.price:
-        f.append(float(o.price) * (1 - max_disc_pct / 100.0))
+    if base:
+        f.append(float(base) * (1 - max_disc_pct / 100.0))
     return int(max(f) + 0.999)
 
 
@@ -379,7 +387,7 @@ def plan_reprice(prods: List[Prod], today: str, delta=5000, floors=None, max_dis
             continue  # holding the box: never lower the price, only follow up
         if done_today.get(o.key, 0) >= max_per_day:
             skips.append((o, f"daily limit {max_per_day} reached")); continue
-        floor = reprice_floor(o, floors.get(o.key) or floors.get(o.id), max_disc_pct)
+        floor = reprice_floor(o, floors.get(o.key) or floors.get(o.id), max_disc_pct, today)
         if target < floor:
             skips.append((o, f"competitor {int(o.buy_box)} -> target {target} is below floor {floor}")); continue
         if target < eff:
@@ -620,7 +628,7 @@ def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, tod
             continue  # stale: marked losing but already at/below the box
         if o.is_bb and np_ <= old:
             continue  # holding the box: never lower, only follow up
-        lowest = reprice_floor(o, floor or None)
+        lowest = reprice_floor(o, floor or None, 45.0, today)
         why = ""
         if o.blacklist:
             why = "در لیست سیاه"
