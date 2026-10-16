@@ -84,6 +84,16 @@ def fa(text) -> str:
     return "\n".join(get_display(arabic_reshaper.reshape(l)) for l in str(text).split("\n"))
 
 
+def par(text, width=34) -> str:
+    """Shape a (possibly long) Persian paragraph for Kivy: first break it into short
+    lines (L.break_lines), then apply fa() per line.
+
+    Why: Kivy wraps text LTR, but fa() puts a whole paragraph in visual (RTL) order.
+    When Kivy then wraps that string, the top line shows the END of the sentence, so
+    long descriptions read bottom-to-top. Pre-breaking keeps every line correct."""
+    return "\n".join(fa(l) for l in L.break_lines(text, width))
+
+
 def n(x) -> str:
     return "—" if x is None else f"{int(round(x)):,}"
 
@@ -114,7 +124,7 @@ class TapBg(ButtonBehavior, Bg):
 
 
 def lab(text, color=TXT, size=14, bold=False, halign="right"):
-    l = Label(text=fa(text), font_name=FONT_B if bold else FONT, font_size=sp(size),
+    l = Label(text=par(text), font_name=FONT_B if bold else FONT, font_size=sp(size),
               color=color, halign=halign, valign="middle", size_hint_y=None)
     l.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
     l.bind(texture_size=lambda i, s: setattr(i, "height", max(s[1], dp(18)) + dp(4)))
@@ -273,7 +283,7 @@ class LogRow(Bg):
         t = Label(text=ts, font_name=FONT, font_size=sp(11), color=MUT, size_hint=(None, None),
                   size=(dp(44), dp(18)), halign="left", valign="top")
         t.bind(size=lambda i, s: setattr(i, "text_size", s))
-        m = SelText(text=fa(text[:6000]), readonly=True, multiline=True, font_name=FONT, font_size=sp(13),
+        m = SelText(text=par(text[:6000]), readonly=True, multiline=True, font_name=FONT, font_size=sp(13),
                     foreground_color=col, background_normal="", background_active="", background_color=(0, 0, 0, 0),
                     cursor_color=(0, 0, 0, 0), halign="right" if rtl else "left", size_hint_y=None, height=dp(30),
                     padding=[0, dp(2), 0, dp(2)], use_bubble=True, use_handles=True)
@@ -290,16 +300,17 @@ class NavBtn(ToggleButtonBehavior, Label):
         self.name, self.app = name, app
         with self.canvas.before:
             self._ic = Color(*ACC[:3], 0)
-            self._ind = RoundedRectangle(radius=[dp(2)])
+            self._ind = RoundedRectangle(radius=[dp(16)])
         self.bind(pos=self._u, size=self._u)
 
     def _u(self, *_):
-        self._ind.pos = (self.x + self.width * 0.25, self.y + self.height - dp(4))
-        self._ind.size = (self.width * 0.5, dp(3))
+        pad = dp(5)
+        self._ind.pos = (self.x + pad, self.y + pad)
+        self._ind.size = (self.width - pad * 2, self.height - pad * 2)
 
     def on_state(self, _w, st):
-        self.color = ACC if st == "down" else MUT
-        self._ic.a = 1 if st == "down" else 0
+        self.color = (1, 1, 1, 1) if st == "down" else MUT
+        self._ic.a = 0.30 if st == "down" else 0
         if st == "down":
             self.app.sm.current = self.name
 
@@ -485,22 +496,26 @@ class SnappShopApp(App):
         brow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
         brow.add_widget(p3)
         brow.add_widget(p2)
-        p4 = RBtn("ویرایش گروهی (قیمت و موجودی)", (0.20, 0.45, 0.85, 1))
+        p4 = RBtn("ویرایش گروهی", (0.20, 0.45, 0.85, 1))
         p4.bind(on_release=lambda *_: self.bulk_edit())
-        p5 = RBtn("تخفیف گروهی با تاریخ شروع و پایان", (0.20, 0.55, 0.45, 1))
+        p5 = RBtn("تخفیف گروهی", (0.20, 0.55, 0.45, 1))
         p5.bind(on_release=lambda *_: self.discount_campaign())
-        p6 = RBtn("تعدیل گروهی برای برنده شدن در بای‌باکس", (0.55, 0.38, 0.85, 1))
+        p6 = RBtn("بای‌باکس گروهی", (0.55, 0.38, 0.85, 1))
         p6.bind(on_release=lambda *_: self.undercut())
-        p7 = RBtn("خروجی Excel همه محصولات", ACC2)
+        p7 = RBtn("خروجی Excel", ACC2)
         p7.bind(on_release=lambda *_: self.export_products_xlsx())
-        p8 = RBtn("↩ بازگردانی تغییرات قبلی (Undo)", (0.80, 0.50, 0.15, 1))
+        p8 = RBtn("↩ بازگردانی", (0.80, 0.50, 0.15, 1))
         p8.bind(on_release=lambda *_: self.open_undo())
+        pgrid = GridLayout(cols=2, spacing=dp(8), size_hint_y=None)
+        pgrid.bind(minimum_height=pgrid.setter("height"))
+        for b in (p4, p5, p6, p8, p7):
+            pgrid.add_widget(b)
         self.ptiles = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(62), spacing=dp(8))
         self.pl = vbox()
         self.pl.spacing = dp(10)
         self.psv = page(
             self.ptiles,
-            card("", p1, brow, p4, p5, p6, p8, p7, self.pcount, self.ent_q,
+            card("", p1, brow, pgrid, self.pcount, self.ent_q,
                  lab("حد «کم‌موجودی» (تعداد)", MUT, 12), self.ent_low, self.pchips_sv),
             self.pl)
         self._add("prod", self.psv)
@@ -990,10 +1005,20 @@ class SnappShopApp(App):
         self._run(f)
 
     def edit_product(self, o):
+        today = datetime.date.today()
         ep = inp("Price", "" if o.price is None else str(int(o.price)), input_filter="int")
         es = inp("Stock", "" if o.stock is None else str(int(o.stock)), input_filter="int")
+        ed = inp("قیمت با تخفیف", "" if not o.sp else str(int(o.sp)), input_filter="int")
+        e_st = inp("YYYY-MM-DD", o.sp_start[:10] if o.sp_start else today.isoformat())
+        e_en = inp("YYYY-MM-DD", o.sp_end[:10] if o.sp_end else (today + datetime.timedelta(days=30)).isoformat())
         body = vbox()
-        for w in (lab("قیمت پایه (تومان)", MUT, 12), ep, lab("موجودی", MUT, 12), es):
+        widgets = [lab("قیمت پایه (تومان)", MUT, 12), ep, lab("موجودی", MUT, 12), es]
+        if o.buy_box is not None:
+            widgets.append(lab(f"قیمت نفر دوم (بای‌باکس): {n(o.buy_box)} تومان", AMB, 12, bold=True))
+        widgets += [lab("قیمت با تخفیف (تومان) — خالی = بدون تغییر", MUT, 12), ed,
+                    lab("شروع تخفیف (میلادی)", MUT, 12), e_st,
+                    lab("پایان تخفیف (میلادی)", MUT, 12), e_en]
+        for w in widgets:
             body.add_widget(w)
         def save():
             if not self._need_vid():
@@ -1001,16 +1026,32 @@ class SnappShopApp(App):
             try:
                 pr = int(ep.text) if ep.text.strip() else o.price
                 st = int(es.text) if es.text.strip() else o.stock
-                item = o.item(price=pr, stock=st)
+                kw, dsp_info = {}, None
+                if ed.text.strip():
+                    dsp = int(ed.text.strip())
+                    if pr and dsp >= pr:
+                        self.log("قیمت تخفیف باید از قیمت پایه کمتر باشد.", "err")
+                        return False
+                    stt = datetime.date.fromisoformat(e_st.text.strip())
+                    en = datetime.date.fromisoformat(e_en.text.strip())
+                    if en < stt:
+                        self.log("تاریخ پایان تخفیف قبل از شروع است.", "err")
+                        return False
+                    kw = dict(special_price=dsp, special_price_start_at=stt.isoformat(),
+                              special_price_end_at=en.isoformat(), special_price_stock=int(st))
+                    dsp_info = (dsp, stt.isoformat(), en.isoformat())
+                item = o.item(price=pr, stock=st, **kw)
             except Exception:
                 self.log("قیمت و موجودی باید عدد باشند.", "err")
                 return False
             def then(bad):
                 if o.key not in bad:
                     o.price, o.stock = item["price"], item["stock"]
+                    if dsp_info:
+                        o.sp, o.sp_start, o.sp_end = dsp_info
                 self.render_products()
             self.patch([item], then, "ویرایش یک کالا", [o])
-        self.modal(o.name, o.key, body, [("انصراف", ACC2, None), ("ذخیره", ACC, save)], h=0.6)
+        self.modal(o.name, o.key, body, [("انصراف", ACC2, None), ("ذخیره", ACC, save)], h=0.85)
 
     def bulk_edit(self):
         sel = [o for o in self.P if o.sel]

@@ -245,6 +245,31 @@ def norm_prod(raw: dict, i: int = 0) -> Prod:
 
 PRODUCT_URL = "https://snappshop.ir/product/{n}"   # change here if SnappShop changes its page address
 
+def break_lines(text, width=34):
+    """Split (possibly long) text into short lines at word boundaries.
+
+    Used before Persian bidi shaping: Kivy wraps text LTR, so shaping a whole
+    paragraph at once makes long descriptions read bottom-to-top. Pre-breaking
+    into short lines keeps every line correct. Pure stdlib (no shaping here)."""
+    out = []
+    for para in str(text).split("\n"):
+        words = para.split()
+        if not words:
+            out.append("")
+            continue
+        line, n = [], 0
+        for w in words:
+            add = len(w) + (1 if line else 0)
+            if line and n + add > width:
+                out.append(" ".join(line))
+                line, n = [w], len(w)
+            else:
+                line.append(w)
+                n += add
+        out.append(" ".join(line))
+    return out
+
+
 # filters that cannot be combined (choosing one replaces its opposite)
 FILTER_EXCLUSIVE = {"active": "inactive", "inactive": "active", "instock": "oos", "oos": "instock",
                     "bbwin": "bblose", "bblose": "bbwin"}

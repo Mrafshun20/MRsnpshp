@@ -234,6 +234,17 @@ class Filters2(unittest.TestCase):
         self.assertEqual(rows[0]["np"], 6145000)
         self.assertEqual(rows[0]["item"], {"id": "z681wQ", "price": 6145000, "stock": 1})
 
+    def test_break_lines(self):
+        # short text stays on one line
+        self.assertEqual(L.break_lines("سلام دنیا"), ["سلام دنیا"])
+        # long paragraph is broken at word boundaries, order preserved
+        lines = L.break_lines("یک دو سه چهار پنج شش هفت", width=10)
+        self.assertTrue(all(len(l) <= 10 for l in lines))
+        self.assertEqual(" ".join(lines).split(), "یک دو سه چهار پنج شش هفت".split())
+        # explicit newlines are kept
+        self.assertEqual(L.break_lines("الف\nب"), ["الف", "ب"])
+        self.assertEqual(L.break_lines(""), [""])
+
     def test_order_need_action(self):
         mk = lambda st: L.norm_order({"order_number": 1, "order_status": st})
         self.assertFalse(mk("CONFIRMED").need_action)    # needs preparation, not action
