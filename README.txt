@@ -1,5 +1,8 @@
 SnappShop vendor app (Android APK + Windows EXE) - same code, same tools on both.
 
+Branch ui-modern: same logic as main, rebuilt light seller-panel UI.
+Branch main is unchanged.
+
 Repo root must contain:
   main.py logic.py core.py bot.py build_windows.py buildozer.spec icon.png DejaVuSans.ttf DejaVuSans-Bold.ttf
   tests/test_logic.py
