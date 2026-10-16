@@ -217,5 +217,22 @@ class Undo(unittest.TestCase):
         self.assertIn("موجودی 3 به 8", txt)
 
 
+class Filters2(unittest.TestCase):
+    def test_combined_filters_and_url(self):
+        ps = [L.norm_prod(P1), L.norm_prod(P2), L.norm_prod(dict(P2, id="z2", active=False))]
+        t = "2026-10-15"
+        both = [p.id for p in ps if L.match_all(p, {"bblose", "active"}, 3, t)]
+        self.assertEqual(both, ["z681wQ"])                       # loses buy box AND is active (z2 is inactive)
+        self.assertEqual(L.FILTER_EXCLUSIVE["bbwin"], "bblose")
+        self.assertEqual(L.norm_prod(dict(P1, parent_product_number=758717427)).url(), "https://snappshop.ir/product/758717427")
+        self.assertEqual(L.norm_prod(P1).url(), "")
+
+    def test_plan_only(self):
+        p2 = L.norm_prod(P2)
+        rows, _ = L.plan_undercut([p2], 5000, 0, 15, "2026-10-15", False, only=[p2])
+        self.assertEqual(rows[0]["np"], 6145000)
+        self.assertEqual(rows[0]["item"], {"id": "z681wQ", "price": 6145000, "stock": 1})
+
+
 if __name__ == "__main__":
     unittest.main()
