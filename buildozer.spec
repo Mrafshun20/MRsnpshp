@@ -1,6 +1,6 @@
 [app]
-title = SnappShop
-package.name = snappshop
+title = SnappShop روشن
+package.name = snappshop_light
 package.domain = org.vendor
 source.dir = .
 source.include_exts = py,ttf,png

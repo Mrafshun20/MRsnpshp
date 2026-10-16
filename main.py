@@ -206,6 +206,11 @@ class RBtn(ButtonBehavior, Label):
     def set_text(self, t):
         self.text = fa(t)
 
+    def set_color(self, color):
+        self._c = color
+        self._col.rgba = color
+        self.color = TXT if _luma(color) > 0.72 else (1, 1, 1, 1)
+
     def on_press(self):
         self._col.rgba = tuple(max(0, c * 0.86) for c in self._c[:3]) + (1,)
 
@@ -640,7 +645,6 @@ class SnappShopApp(App):
             mb.bind(on_release=lambda _w, g=gid: self.open_fmenu(g))
             self.fmenus[gid] = mb
             self.frow.add_widget(mb)
-        self.pchips_sv, self.pchips = chip_row()
         self.ent_q = inp("جستجو در نام محصول، کد محصول و کد فروشنده", persian=True)
         self.ent_q.on_raw = self._on_q_raw
         self.ent_low = inp("3", str(self.low), input_filter="int")
@@ -1003,38 +1007,38 @@ class SnappShopApp(App):
             Clock.unschedule(self._q_apply)
             Clock.schedule_once(self._q_apply, 0.5)
 
-    def set_pf(self, key):
-        # several filters can be active together (e.g. بای‌باکس ندارم + فعال); «همه» clears them
-        if key == "all":
-            self.PF = set()
-        elif key in self.PF:
-            self.PF.discard(key)
-        else:
-            self.PF.add(key)
-            self.PF.discard(L.FILTER_EXCLUSIVE.get(key, ""))
-        self.shown = 100
-        self.render_products()
-        self.scroll_top("prod")
-
     def open_fmenu(self, gid):
         title, opts, single = self._fgroups[gid]
         keys = [k for k, _ in opts]
+        labels = dict(opts)
         body = vbox()
         holder = {}
+        opt_btns = {}
+
+        def refresh_opts():
+            for k, bt in opt_btns.items():
+                on = k in self.PF
+                bt.set_text(("✓  " if on else "") + labels[k])
+                bt.set_color(ACC if on else ACC2)
 
         def pick(key):
             def cb(*_a):
                 self.apply_fmenu(keys, key, single)
-                mv = holder.get("mv")
-                if mv:
-                    mv.dismiss()
+                if single:
+                    mv = holder.get("mv")
+                    if mv:
+                        mv.dismiss()
+                else:
+                    # multi-select group: keep the menu open, just refresh the ticks
+                    refresh_opts()
             return cb
 
         for key, label in opts:
-            on = key in self.PF
-            bt = RBtn(("✓  " if on else "") + label, ACC if on else ACC2)
+            bt = RBtn(label, ACC2)
             bt.bind(on_release=pick(key))
+            opt_btns[key] = bt
             body.add_widget(bt)
+        refresh_opts()
         mv, _btns = self.modal(title, "انتخاب کنید. «پاک کردن» فقط همین فیلتر را برمی‌دارد.", body,
                                [("پاک کردن", ACC2, lambda: self.apply_fmenu(keys, None, single)),
                                 ("بستن", ACC2, None)], h=0.62)
@@ -1056,7 +1060,7 @@ class SnappShopApp(App):
         self.render_products()
         self.scroll_top("prod")
 
-    def render_pchips(self):
+    def update_fmenus(self):
         if not getattr(self, "fmenus", None):
             return
         st = "فعال" if "active" in self.PF else "غیرفعال" if "inactive" in self.PF else "وضعیت کالا"
@@ -1089,7 +1093,7 @@ class SnappShopApp(App):
 
     def render_products(self):
         self.render_tiles()
-        self.render_pchips()
+        self.update_fmenus()
         self.pl.clear_widgets()
         Lst = self.vis()
         for o in Lst[:self.shown]:
@@ -1100,7 +1104,7 @@ class SnappShopApp(App):
             self.pl.add_widget(more)
         if not Lst:
             if self.P and "mylist" in self.PF and not self.mylist:
-                msg = "«لیست من» هنوز خالی است — روی ☆ هر محصول بزنید تا به لیست اضافه شود."
+                msg = "«لیست من» هنوز خالی است — روی «افزودن به لیست» هر محصول بزنید تا به لیست اضافه شود."
             else:
                 msg = "موردی با این فیلتر پیدا نشد." if self.P else "برای نمایش، «بروزرسانی» را بزنید."
             self.pl.add_widget(lab(msg, MUT, 13, halign="center"))
