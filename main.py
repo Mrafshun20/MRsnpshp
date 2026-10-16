@@ -303,6 +303,10 @@ class NavBtn(ToggleButtonBehavior, Label):
         if st == "down":
             self.app.sm.current = self.name
 
+    def on_release(self):
+        # tapping a tab (even the active one) scrolls its list back to the top
+        self.app.scroll_top(self.name)
+
 
 class StatusBar(ButtonBehavior, Label):
     pass
@@ -341,8 +345,8 @@ class GuiLogHandler(logging.Handler):
 
 class ProdCard(Bg):
     def __init__(self, o, app, **kw):
-        super().__init__(color=CARD, radius=12, orientation="vertical", size_hint_y=None,
-                         padding=dp(10), spacing=dp(6), **kw)
+        super().__init__(color=CARD, radius=14, orientation="vertical", size_hint_y=None,
+                         padding=dp(12), spacing=dp(8), **kw)
         self.o, self.app = o, app
         self.bind(minimum_height=self.setter("height"))
         top = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(10))
@@ -494,11 +498,12 @@ class SnappShopApp(App):
         self.ptiles = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(62), spacing=dp(8))
         self.pl = vbox()
         self.pl.spacing = dp(10)
-        self._add("prod", page(
+        self.psv = page(
             self.ptiles,
             card("", p1, brow, p4, p5, p6, p8, p7, self.pcount, self.ent_q,
                  lab("حد «کم‌موجودی» (تعداد)", MUT, 12), self.ent_low, self.pchips_sv),
-            self.pl))
+            self.pl)
+        self._add("prod", self.psv)
 
         # --- orders
         self.ent_sd = inp("YYYY-MM-DD")
@@ -513,12 +518,14 @@ class SnappShopApp(App):
         self.ochips_sv, self.ochips = chip_row()
         self.ol = vbox()
         self.ol.spacing = dp(10)
-        self._add("ord", page(
+        self.osv = page(
             card("سفارشات و گزارش فروش",
                  lab("از تاریخ (میلادی؛ خالی = ۱۴ روز اخیر)", MUT, 12), self.ent_sd,
                  lab("تا تاریخ (میلادی)", MUT, 12), self.ent_ed, o1, o2),
+            lab("تأیید سفارش در API اسنپ‌شاپ وجود ندارد؛ سفارشِ تأییدنشده را در وب‌سایت پنل فروشندگان تأیید کنید و بعد «نمایش لیست سفارشات» را بزنید.", AMB, 11, halign="center"),
             self.ochips_sv, self.ol,
-            card("جزئیات یک سفارش", lab("شماره سفارش", MUT, 12), self.ent_ord, o4)))
+            card("جزئیات یک سفارش", lab("شماره سفارش", MUT, 12), self.ent_ord, o4))
+        self._add("ord", self.osv)
 
         # --- automation page
         if False:   # old Android-only watcher; the full bot now runs on every platform
@@ -622,6 +629,13 @@ class SnappShopApp(App):
         for nb in self.navs:
             if nb.name == name:
                 nb.state = "down"
+
+    def scroll_top(self, name):
+        """Scroll a tab's list back to the top (used after refreshes and tab taps)."""
+        sv = {"prod": getattr(self, "psv", None), "ord": getattr(self, "osv", None),
+              "log": getattr(self, "log_sv", None)}.get(name)
+        if sv is not None:
+            sv.scroll_y = 1
 
     # ---- helpers
     def ui(self, fn):
@@ -790,6 +804,7 @@ class SnappShopApp(App):
     def _q_apply(self, _dt):
         self.shown = 100
         self.render_products()
+        self.scroll_top("prod")
 
     def _on_low(self, _i, val):
         v = self._fnum(val)
@@ -809,6 +824,7 @@ class SnappShopApp(App):
             self.PF.discard(L.FILTER_EXCLUSIVE.get(key, ""))
         self.shown = 100
         self.render_products()
+        self.scroll_top("prod")
 
     def render_pchips(self):
         self.pchips.clear_widgets()
@@ -832,8 +848,8 @@ class SnappShopApp(App):
                 ("کم‌موجودی", sum(1 for o in P if L.match(o, "low", self.low, today)), AMB),
                 ("بدون بای‌باکس", sum(1 for o in P if L.match(o, "bblose", self.low, today)), RED)]
         for label, v, col in reversed(data):
-            t = Bg(color=CHIP, radius=12, border=EDGE, orientation="vertical", padding=dp(4))
-            t.add_widget(Label(text=n(v), font_name=FONT_B, font_size=sp(18), color=col))
+            t = Bg(color=CHIP, radius=14, border=EDGE, orientation="vertical", padding=dp(4))
+            t.add_widget(Label(text=n(v), font_name=FONT_B, font_size=sp(20), color=col))
             t.add_widget(Label(text=fa(label), font_name=FONT, font_size=sp(10), color=MUT))
             self.ptiles.add_widget(t)
 
@@ -849,7 +865,11 @@ class SnappShopApp(App):
             more.bind(on_release=lambda *_: self._more())
             self.pl.add_widget(more)
         if not Lst:
-            self.pl.add_widget(lab("موردی پیدا نشد." if self.P else "برای نمایش، «بروزرسانی لیست» را بزنید.", MUT, 13, halign="center"))
+            if self.P and "mylist" in self.PF and not self.mylist:
+                msg = "«لیست من» هنوز خالی است — روی ☆ هر محصول بزنید تا به لیست اضافه شود."
+            else:
+                msg = "موردی پیدا نشد." if self.P else "برای نمایش، «بروزرسانی لیست» را بزنید."
+            self.pl.add_widget(lab(msg, MUT, 13, halign="center"))
         self.upd_sel()
 
     def _more(self):
@@ -892,6 +912,7 @@ class SnappShopApp(App):
                         o.sel = True
                 self.shown = 100
                 self.render_products()
+                self.scroll_top("prod")
                 self.log(f"تعداد محصولات: {len(raw)}", "ok")
             self.ui(done)
         self.log("در حال دریافت محصولات...")
@@ -1236,8 +1257,10 @@ class SnappShopApp(App):
             for s_, c_ in reversed(list(cnt.items())):
                 addc(L.status_fa(s_) or "—", "st:" + s_, c_)
             addc("نیازمند آماده‌سازی", "prep", sum(1 for o in self.O if o.prep))
+            addc("⏳ در انتظار اقدام", "pending", sum(1 for o in self.O if o.need_action))
             addc("همه", "all", len(self.O))
-        sel = [o for o in self.O if self.OF == "all" or (self.OF == "prep" and o.prep) or self.OF == "st:" + o.status]
+        sel = [o for o in self.O if self.OF == "all" or (self.OF == "prep" and o.prep)
+               or (self.OF == "pending" and o.need_action) or self.OF == "st:" + o.status]
         sel = sorted(sel, key=lambda o: o.pickup_end or "9") if self.OF == "prep" else list(reversed(sel))
         nowt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for o in sel[:150]:
@@ -1267,6 +1290,7 @@ class SnappShopApp(App):
     def set_of(self, key):
         self.OF = key
         self.render_orders()
+        self.scroll_top("ord")
 
     def load_orders(self):
         if not self._need_vid():
@@ -1277,7 +1301,10 @@ class SnappShopApp(App):
                 self.O = [L.norm_order(o, i) for i, o in enumerate(d)]
                 self.OF = "all"
                 self.render_orders()
-                self.log(f"تعداد سفارشات: {len(self.O)} · نیازمند آماده‌سازی: {sum(1 for o in self.O if o.prep)}", "ok")
+                self.scroll_top("ord")
+                n_prep = sum(1 for o in self.O if o.prep)
+                n_pend = sum(1 for o in self.O if o.need_action)
+                self.log(f"تعداد سفارشات: {len(self.O)} · نیازمند آماده‌سازی: {n_prep} · در انتظار اقدام: {n_pend}", "ok")
             self.ui(done)
         self.log("در حال دریافت سفارشات...")
         self._run(f)

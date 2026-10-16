@@ -432,6 +432,12 @@ class Order:
         self.prep = self.status.upper() == "CONFIRMED"
         self.canceled = self.status.upper() in ("CANCELED", "CANCELLED")
 
+    @property
+    def need_action(self) -> bool:
+        """Not confirmed and not canceled: the vendor should act in the seller panel
+        (the API exposes no order-confirmation endpoint)."""
+        return not self.prep and not self.canceled
+
 
 def norm_order(raw: dict, i: int = 0) -> Order:
     return Order(raw, i)

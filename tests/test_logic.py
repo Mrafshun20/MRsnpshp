@@ -234,6 +234,14 @@ class Filters2(unittest.TestCase):
         self.assertEqual(rows[0]["np"], 6145000)
         self.assertEqual(rows[0]["item"], {"id": "z681wQ", "price": 6145000, "stock": 1})
 
+    def test_order_need_action(self):
+        mk = lambda st: L.norm_order({"order_number": 1, "order_status": st})
+        self.assertFalse(mk("CONFIRMED").need_action)    # needs preparation, not action
+        self.assertFalse(mk("CANCELED").need_action)
+        self.assertFalse(mk("CANCELLED").need_action)
+        self.assertTrue(mk("PENDING").need_action)       # unconfirmed -> vendor must act in the panel
+        self.assertTrue(mk("").need_action)
+
 
 class RepriceFollowUp(unittest.TestCase):
     """The buy-box gap to the runner-up ("second person") is kept at `delta`
