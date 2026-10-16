@@ -344,14 +344,22 @@ def reprice_floor(o: Prod, explicit=None, max_disc_pct=45.0):
 
 
 def plan_reprice(prods: List[Prod], today: str, delta=5000, floors=None, max_disc_pct=45.0,
-                 max_drop_pct=15.0, days=30, done_today=None, max_per_day=4):
-    """Buy-box repricing through special_price. Returns (changes, skips):
+                 max_drop_pct=15.0, days=30, done_today=None, max_per_day=4, max_rise_pct=15.0):
+    """Buy-box repricing through special_price, always targeting (buy_box - delta).
+
+    The gap to the runner-up ("نفر دوم") is kept at `delta` in both directions:
+      * losing (or winning by less than delta): lower the effective price to buy_box - delta;
+      * winning by more than delta: RAISE the effective price to buy_box - delta, so when the
+        runner-up raises their price, yours follows up instead of leaving money on the table.
+    Safety: while holding the buy box the price is never lowered (only raised toward the
+    target); single-move drops are capped by max_drop_pct and rises by max_rise_pct.
+    Returns (changes, skips):
     changes = [(prod, patch_item, old_effective, new_price)], skips = [(prod, reason)]."""
     floors, done_today = floors or {}, done_today or {}
     changes, skips = [], []
     end_default = (datetime.date.fromisoformat(today) + datetime.timedelta(days=int(days))).isoformat()
     for o in prods:
-        if o.buy_box is None or o.is_bb:
+        if o.buy_box is None:
             continue
         if o.blacklist:
             skips.append((o, "blacklisted")); continue
@@ -360,16 +368,25 @@ def plan_reprice(prods: List[Prod], today: str, delta=5000, floors=None, max_dis
         if o.price is None:
             continue
         eff = o.sp if o.has_discount(today) else o.price
-        if o.buy_box >= eff:
-            continue  # not losing on price
+        if eff is None:
+            continue
+        target = int(o.buy_box - delta)
+        if target == int(eff):
+            continue  # already exactly delta below the runner-up
+        if not o.is_bb and o.buy_box >= eff:
+            continue  # marked as losing but price already at/below the box: stale data, skip quietly
+        if o.is_bb and target <= int(eff):
+            continue  # holding the box: never lower the price, only follow up
         if done_today.get(o.key, 0) >= max_per_day:
             skips.append((o, f"daily limit {max_per_day} reached")); continue
-        target = int(o.buy_box - delta)
         floor = reprice_floor(o, floors.get(o.key) or floors.get(o.id), max_disc_pct)
         if target < floor:
             skips.append((o, f"competitor {int(o.buy_box)} -> target {target} is below floor {floor}")); continue
-        if eff > 0 and (eff - target) / eff * 100 > max_drop_pct:
-            skips.append((o, f"drop {int(eff)}->{target} exceeds {max_drop_pct:g}% (suspicious)")); continue
+        if target < eff:
+            if eff > 0 and (eff - target) / eff * 100 > max_drop_pct:
+                skips.append((o, f"drop {int(eff)}->{target} exceeds {max_drop_pct:g}% (suspicious)")); continue
+        elif eff > 0 and (target - eff) / eff * 100 > max_rise_pct:
+            skips.append((o, f"rise {int(eff)}->{target} exceeds {max_rise_pct:g}% (suspicious)")); continue
         if o.has_discount(today):
             start, end = (o.sp_start[:10] or today), (o.sp_end[:10] or end_default)
             ds = int(min(o.sp_stock, o.stock)) if o.sp_stock else int(o.stock)
@@ -575,20 +592,34 @@ def products_export_rows(prods: List[Prod]):
 
 
 # ---------------- manual buy-box undercut (preview first) ----------------
-def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, today: str, selected_only: bool, only=None):
-    """Price just below the buy-box price. Returns (rows, skipped); row = {o, np, why, item, kind}."""
+def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, today: str, selected_only: bool, only=None,
+                  maxrise: float = None):
+    """Target buy_box - delta for every product with buy-box data, in both directions.
+
+    Losers are lowered to buy_box - delta; winners whose gap to the runner-up exceeds delta
+    are raised to it (so a runner-up raising their price pulls yours up too). While holding
+    the buy box the price is never lowered (safety). maxrise caps a single manual raise
+    (None = no cap; the user reviews every row anyway).
+    Returns (rows, skipped); row = {o, np, old, why, item, kind, up} (up=True means a rise)."""
     sel = [o for o in prods if o.sel]
     if only is not None:                       # explicit list (one product, or the filtered list on screen)
-        base = [o for o in only if o.buybox_state(today) == "lose"]
+        cands = list(only)
     else:
-        base = sel if (selected_only and sel) else [o for o in prods if o.buybox_state(today) == "lose"]
+        cands = sel if (selected_only and sel) else list(prods)
     rows, skipped = [], 0
-    for o in base:
+    for o in cands:
         e = o.eff_price(today)
         if o.buy_box is None or e is None or o.stock is None or o.price is None:
             skipped += 1
             continue
         np_ = int(o.buy_box - delta)
+        old = int(e)
+        if np_ == old:
+            continue  # already exactly on target
+        if not o.is_bb and o.buy_box >= e:
+            continue  # stale: marked losing but already at/below the box
+        if o.is_bb and np_ <= old:
+            continue  # holding the box: never lower, only follow up
         lowest = reprice_floor(o, floor or None)
         why = ""
         if o.blacklist:
@@ -599,10 +630,10 @@ def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, tod
             why = "قیمت نامعتبر"
         elif np_ < lowest:
             why = "زیر حداقل مجاز"
-        elif np_ >= e:
-            why = "قیمت شما از قبل پایین‌تر است"
         elif maxdrop and (e - np_) / e * 100 > maxdrop:
             why = "افت قیمت بیش از حد مجاز"
+        elif maxrise and (np_ - e) / e * 100 > maxrise:
+            why = "افزایش قیمت بیش از حد مجاز"
         kind = "special" if o.has_discount(today) else "base"
         item = None
         if not why:
@@ -613,7 +644,7 @@ def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, tod
                 item = o.item(**extra)
             else:
                 item = o.item(price=np_)
-        rows.append({"o": o, "np": np_, "why": why, "item": item, "kind": kind})
+        rows.append({"o": o, "np": np_, "old": old, "why": why, "item": item, "kind": kind, "up": np_ > old})
     return rows, skipped
 
 

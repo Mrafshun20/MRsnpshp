@@ -234,5 +234,57 @@ class Filters2(unittest.TestCase):
         self.assertEqual(rows[0]["item"], {"id": "z681wQ", "price": 6145000, "stock": 1})
 
 
+class RepriceFollowUp(unittest.TestCase):
+    """The buy-box gap to the runner-up ("second person") is kept at `delta`
+    in both directions: losers are lowered, winners with a bigger gap are raised."""
+
+    def _mk(self, **kw):
+        d = dict(P2)
+        d.update(kw)
+        return L.norm_prod(d)
+
+    def test_raise_when_winning_by_margin(self):
+        p = self._mk(is_buy_box=True, buy_box=6150000, price=6000000)
+        ch, sk = L.plan_reprice([p], "2026-10-15", delta=5000)
+        self.assertEqual(len(ch), 1)
+        self.assertEqual(ch[0][3], 6145000)            # raised to runner-up - delta
+        self.assertEqual(ch[0][1]["special_price"], 6145000)
+
+    def test_never_lower_while_winning(self):
+        p = self._mk(is_buy_box=True, buy_box=6150000, price=6150000)   # tie: winning
+        ch, sk = L.plan_reprice([p], "2026-10-15", delta=5000)
+        self.assertEqual(ch, [])
+
+    def test_already_on_target(self):
+        p = self._mk(is_buy_box=True, buy_box=6150000, price=6145000)   # exactly on target
+        ch, sk = L.plan_reprice([p], "2026-10-15", delta=5000)
+        self.assertEqual(ch, [])
+
+    def test_rise_guard(self):
+        p = self._mk(is_buy_box=True, buy_box=9000000, price=6000000)
+        ch, sk = L.plan_reprice([p], "2026-10-15", delta=5000, max_rise_pct=15.0)
+        self.assertEqual(ch, [])
+        self.assertTrue(sk)                          # 49.9% rise exceeds the guard
+
+    def test_loser_still_lowers(self):
+        p = self._mk()                               # P2 as-is: losing
+        ch, sk = L.plan_reprice([p], "2026-10-15", delta=5000)
+        self.assertEqual(len(ch), 1)
+        self.assertEqual(ch[0][3], 6145000)
+
+    def test_undercut_winner_raise_row(self):
+        p = self._mk(is_buy_box=True, buy_box=6150000, price=6000000)
+        rows, skipped = L.plan_undercut([p], 5000, 0, 15, "2026-10-15", False, only=[p])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["np"], 6145000)
+        self.assertTrue(rows[0]["up"])
+        self.assertEqual(rows[0]["why"], "")
+
+    def test_undercut_winner_at_target_has_no_row(self):
+        p = self._mk(is_buy_box=True, buy_box=6150000, price=6145000)
+        rows, skipped = L.plan_undercut([p], 5000, 0, 15, "2026-10-15", False, only=[p])
+        self.assertEqual(rows, [])
+
+
 if __name__ == "__main__":
     unittest.main()

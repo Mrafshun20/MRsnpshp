@@ -543,10 +543,15 @@ class SnappShopApp(App):
             c_bot = card("ربات پس‌زمینه", self.bot_lbl, bb1, bb2,
                          lab("تا وقتی ربات روشن است: سفارش جدید و لغو را اعلام می‌کند، هر شب گزارش Excel می‌سازد، تعدیل خودکار بای‌باکس (در صورت روشن بودن) را انجام می‌دهد" + (" و تغییرات فایل prices.csv را روی اسنپ‌شاپ اعمال می‌کند. برنامه را Minimize کنید، نه Close." if self.desktop else ". هشدار: ربات فقط وقتی کار می‌کند که برنامه باز باشد."), MUT, 11))
             c_rp = card("تعدیل خودکار قیمت (بای‌باکس)", self.rp_btn,
-                        lab("برای کالاهایی که بای‌باکس را باخته‌اند، قیمت تخفیفی را ۵٬۰۰۰ تومان زیر قیمت بای‌باکس می‌گذارد؛ هر ۱۰ دقیقه. کف قیمت: بیشترین مقدار از «ستون min_price در prices.csv»، حد پایین قیمت مرجع اسنپ‌شاپ و ۴۵٪ زیر قیمت پایه. حالت آزمایشی فقط در گزارش می‌نویسد. هر تغییر در «بازگردانی تغییرات» (تب محصولات) ثبت می‌شود.", MUT, 11))
+                        lab("قیمت را همیشه ۵٬۰۰۰ تومان زیر قیمت نفر دوم نگه می‌دارد؛ هر ۱۰ دقیقه. اگر بای‌باکس را باخته باشی قیمت پایین می‌آید، و اگر با اختلاف زیاد برنده باشی (نفر دوم گران کرده) قیمت بالا می‌رود تا فاصله حفظ شود. وقتی بای‌باکس دست توست، قیمت هرگز پایین آورده نمی‌شود. کف قیمت: بیشترین مقدار از «ستون min_price در prices.csv»، حد پایین قیمت مرجع اسنپ‌شاپ و ۴۵٪ زیر قیمت پایه. هر حرکت نزولی حداکثر ۱۵٪ و هر حرکت صعودی حداکثر ۱۵٪ در هر دور. حالت آزمایشی فقط در گزارش می‌نویسد. هر تغییر در «بازگردانی تغییرات» (تب محصولات) ثبت می‌شود.", MUT, 11))
             c_file = card("قیمت از روی فایل (Excel)", self.dry_btn, bb3,
                           lab("۱) «ساخت فایل قیمت‌ها» را بزنید. ۲) فایل prices_export.csv را با نام prices.csv کپی کنید. ۳) ستون‌های price و stock و special_price را در Excel ویرایش و ذخیره کنید. ۴) اول در حالت آزمایشی نتیجه را در گزارش ببینید، بعد حالت آزمایشی را خاموش کنید. تغییر قیمت بیش از ۵۰٪ برای جلوگیری از اشتباه تایپی رد می‌شود.", MUT, 11))
-            cards_auto = [c_bot, c_rp] + ([c_file] if self.desktop else []) + [card("فایل‌ها", bb4, bb6, *([bb5] if self.desktop else []))]
+            self.ac_btn = RBtn("", ACC2)
+            self._ac_text()
+            self.ac_btn.bind(on_release=lambda *_: self.toggle_ac())
+            c_ac = card("تأیید خودکار سفارش‌های باز", self.ac_btn,
+                        lab("سفارش‌هایی که هنوز تأیید نشده‌اند (باز و لغونشده) را خودکار تأیید می‌کند؛ همراه با بررسی دوره‌ای سفارش‌ها.\nتوجه: API اسنپ‌شاپ (v2.1.2) فعلاً امکان تأیید سفارش نمی‌دهد؛ این گزینه برای روزی آماده است که اسنپ‌شاپ این قابلیت را به API اضافه کند.", MUT, 11))
+            cards_auto = [c_bot, c_rp, c_ac] + ([c_file] if self.desktop else []) + [card("فایل‌ها", bb4, bb6, *([bb5] if self.desktop else []))]
             if os.name == "nt":
                 self.win_btn = RBtn("", ACC2)
                 self._win_text()
@@ -1061,7 +1066,7 @@ class SnappShopApp(App):
         body = vbox()
         for w in (lab("چند تومان زیر قیمت بای‌باکس", MUT, 12), e_d, lab("حداقل قیمت مجاز (اختیاری)", MUT, 12), e_f,
                   lab("حداکثر افت قیمت نسبت به قیمت فعلی (درصد)", MUT, 12), e_m,
-                  lab("روی کالاهای تیک‌خورده اعمال می‌شود؛ اگر چیزی تیک نخورده باشد، روی همه‌ی کالاهای لیست فعلی (با فیلترهایی که زده‌اید، مثلاً «بای‌باکس ندارم + فعال») که بای‌باکس را باخته‌اند. برای کالاهای دارای تخفیف، قیمت تخفیف تغییر می‌کند. قبل از ارسال، لیست را می‌بینید و بعداً می‌توانید بازگردانی کنید.", MUT, 11)):
+                  lab("روی کالاهای تیک‌خورده اعمال می‌شود؛ اگر چیزی تیک نخورده باشد، روی همه‌ی کالاهای لیست فعلی (با فیلترهایی که زده‌اید). منطق: قیمت همیشه ۵٬۰۰۰ تومان زیر قیمت نفر دوم نگه داشته می‌شود — برای کالاهایی که بای‌باکس را باخته‌اند کاهش می‌یابد، و برای کالاهایی که با اختلاف زیاد برنده‌اند (نفر دوم گران کرده) افزایش می‌یابد. وقتی بای‌باکس دست شماست قیمت هرگز پایین آورده نمی‌شود. برای کالاهای دارای تخفیف، قیمت تخفیف تغییر می‌کند. قبل از ارسال، لیست را می‌بینید و بعداً می‌توانید بازگردانی کنید.", MUT, 11)):
             body.add_widget(w)
         def go_preview():
             delta, floor, mx = int(self._fnum(e_d.text) or 0), int(self._fnum(e_f.text) or 0), float(self._fnum(e_m.text) or 15)
@@ -1077,23 +1082,42 @@ class SnappShopApp(App):
         if not rows:
             self.log("کالایی برای قیمت‌گذاری پیدا نشد." + (f" ({skipped} کالا بدون قیمت بای‌باکس)" if skipped else ""), "err")
             return
+        steady = max(0, len(base) - len(rows) - skipped)
         rows = rows[:300]
         pb = vbox()
+        pb.spacing = dp(10)
         checks = []
         for r in rows:
-            row = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(8))
-            row.bind(minimum_height=row.setter("height"))
-            cb = CheckBox(size_hint=(None, None), size=(dp(30), dp(30)), active=not r["why"], disabled=bool(r["why"]))
+            o = r["o"]
+            bad = bool(r["why"])
+            up = (not bad) and r["up"]
+            edge = RED if bad else (GRN if up else AMB)
+            c = Bg(color=(0.085, 0.11, 0.17, 1) if bad else CARD, radius=10, border=EDGE,
+                   orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(4))
+            c.bind(minimum_height=c.setter("height"))
+            c.add_widget(Bg(color=edge, radius=2, size_hint_y=None, height=dp(3)))
+            hd = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(8))
+            hd.bind(minimum_height=hd.setter("height"))
+            cb = CheckBox(size_hint=(None, None), size=(dp(30), dp(30)), active=not bad, disabled=bad)
             checks.append(cb)
-            t = lab(r["o"].name + (("\n" + r["why"]) if r["why"] else ""), MUT if r["why"] else TXT, 13)
-            v = lab(f"{n(r['o'].eff(today))} ← {n(r['np'])}", TXT, 12, halign="left")
-            v.size_hint_x = None
-            v.width = dp(150)
-            row.add_widget(v)
-            row.add_widget(t)
-            row.add_widget(cb)
-            pb.add_widget(row)
+            tx = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(2))
+            tx.bind(minimum_height=tx.setter("height"))
+            tx.add_widget(lab(o.name, TXT if not bad else MUT, 14, bold=True))
+            tx.add_widget(lab(o.key + (f"  ·  {o.variant}" if o.variant else ""), MUT, 11))
+            hd.add_widget(tx)
+            hd.add_widget(cb)
+            c.add_widget(hd)
+            if bad:
+                c.add_widget(lab("رد شد: " + r["why"], RED, 12))
+            else:
+                arrow = "↑" if up else "↓"
+                c.add_widget(lab(f"{arrow}  {n(r['old'])}  ←  {n(r['np'])} تومان", GRN if up else AMB, 15, bold=True))
+                c.add_widget(lab(f"قیمت نفر دوم (بای‌باکس): {n(o.buy_box)} تومان", MUT, 11))
+            pb.add_widget(c)
         ok = sum(1 for r in rows if not r["why"])
+        n_up = sum(1 for r in rows if not r["why"] and r["up"])
+        n_dn = ok - n_up
+        n_bad = len(rows) - ok
         def apply():
             chosen = [r for r, cb in zip(rows, checks) if cb.active and not r["why"]]
             if not chosen:
@@ -1112,8 +1136,22 @@ class SnappShopApp(App):
                 self.render_products()
                 self.log("برای دیدن وضعیت بای‌باکس، چند دقیقه بعد «بروزرسانی لیست» را بزنید.")
             self.patch([r["item"] for r in chosen], then, "قیمت‌گذاری زیر بای‌باکس", [r["o"] for r in chosen])
-        mv, btns = self.modal("پیش‌نمایش قیمت‌گذاری", f"هر قیمت {n(delta)} تومان زیر بای‌باکس" + (f" · {n(skipped)} کالا بدون قیمت بای‌باکس نادیده گرفته شد" if skipped else ""),
-                              pb, [("انصراف", ACC2, None), (f"اعمال روی {n(ok)} کالا", ACC, apply)])
+        sub = f"هدف: همیشه {n(delta)} تومان زیر قیمت نفر دوم"
+        bits = []
+        if n_dn:
+            bits.append(f"{n_dn} کاهش قیمت")
+        if n_up:
+            bits.append(f"{n_up} افزایش قیمت")
+        if n_bad:
+            bits.append(f"{n_bad} رد شده")
+        if steady:
+            bits.append(f"{steady} بدون تغییر")
+        if skipped:
+            bits.append(f"{skipped} بدون داده بای‌باکس")
+        if bits:
+            sub += "  ·  " + "، ".join(bits)
+        mv, btns = self.modal("پیش‌نمایش قیمت‌گذاری", sub, pb,
+                              [("انصراف", ACC2, None), (f"اعمال روی {n(ok)} کالا", ACC, apply)])
         def upd(*_):
             k = sum(1 for r, cb in zip(rows, checks) if cb.active and not r["why"])
             btns[1].set_text(f"اعمال روی {n(k)} کالا")
@@ -1466,6 +1504,17 @@ class SnappShopApp(App):
         self.bot.jsave(self.bot.CFG, c)
         self._rp_text()
         self.log("تعدیل قیمت: " + self.RP_FA[c["reprice_mode"]], "err" if c["reprice_mode"] == "live" else "ok")
+
+    def _ac_text(self):
+        on = bool(self.bot.jload(self.bot.CFG, {}).get("auto_confirm_orders", False))
+        self.ac_btn.set_text("تأیید خودکار سفارش‌ها: " + ("روشن" if on else "خاموش"))
+
+    def toggle_ac(self):
+        c = self.bot.jload(self.bot.CFG, {})
+        c["auto_confirm_orders"] = not c.get("auto_confirm_orders", False)
+        self.bot.jsave(self.bot.CFG, c)
+        self._ac_text()
+        self.log("تأیید خودکار سفارش‌ها " + ("روشن شد." if c["auto_confirm_orders"] else "خاموش شد."), "ok")
 
     def _win_text(self):
         self.win_btn.set_text("اجرا با روشن شدن ویندوز: " + ("بله" if self.cfg.get("winstart") else "خیر"))

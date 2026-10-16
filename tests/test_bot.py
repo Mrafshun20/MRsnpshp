@@ -27,6 +27,12 @@ class FC:
         return ([{"event_type": "NEW_ORDER", "order_number": 5, "event_at": "2026-10-14 10:00:00",
                   "items": [{"final_price": 700}]}], "c1")
 
+    def orders(self, v, start=None, end=None):
+        return getattr(self, "_orders", [])
+
+    def confirm_order(self, v, number):
+        raise NotImplementedError("no order-confirm endpoint in SnappShop automation API v2.1.2")
+
 
 class BotTest(unittest.TestCase):
     def setUp(self):
@@ -54,6 +60,19 @@ class BotTest(unittest.TestCase):
             txt = f.read()
         self.assertIn("سفارش جدید", txt)
         self.assertIn("1405/07/22", txt)
+
+    def test_auto_confirm_off_by_default(self):
+        self.b.client._orders = [{"order_number": 7, "order_status": "PENDING"}]
+        self.b.auto_confirm()                       # flag off -> no-op, must not crash
+        self.assertFalse(getattr(self.b, "_ac_unsupported", False))
+
+    def test_auto_confirm_unsupported_api_warns_once(self):
+        self.b.client._orders = [{"order_number": 7, "order_status": "PENDING"},
+                                 {"order_number": 8, "order_status": "CONFIRMED"}]
+        self.b.cfg["auto_confirm_orders"] = True
+        self.b.auto_confirm()                       # confirm_order raises NotImplementedError
+        self.assertTrue(self.b._ac_unsupported)
+        self.b.auto_confirm()                       # second call is a silent no-op
 
 
 if __name__ == "__main__":
