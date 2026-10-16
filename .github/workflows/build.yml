@@ -1,8 +1,11 @@
 name: Build APK
 on:
   push:
+    branches: [ main, master, ui-modern ]
     paths-ignore: [ "build_windows.py", ".github/workflows/windows-build.yml", "README.txt" ]
   workflow_dispatch:
+# Variant suffix: the ui-modern branch publishes SnappShop-light.apk next to
+# the main SnappShop.apk in the same "latest" release, so both stay installed side by side.
 permissions:
   contents: write
 jobs:
@@ -39,13 +42,21 @@ jobs:
           echo "=========== LAST LINES ==========="
           tail -n 40 build.log
           test "$(cat code.txt)" = "0"
+      - name: Set variant suffix
+        id: vars
+        run: |
+          if [ "${{ github.ref_name }}" = "ui-modern" ]; then
+            echo "suffix=-light" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Rename APK
-        run: cp bin/*.apk SnappShop.apk
+        run: cp bin/*.apk "SnappShop${{ steps.vars.outputs.suffix }}.apk"
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SnappShop-APK
-          path: SnappShop.apk
+          name: "SnappShop-APK${{ steps.vars.outputs.suffix }}"
+          path: "SnappShop${{ steps.vars.outputs.suffix }}.apk"
       - name: Upload build log (only if the build failed)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -57,4 +68,4 @@ jobs:
         with:
           tag_name: latest
           name: Latest build
-          files: SnappShop.apk
+          files: "SnappShop${{ steps.vars.outputs.suffix }}.apk"
