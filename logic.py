@@ -255,8 +255,8 @@ def match_all(o, keys, low, today) -> bool:
     return all(match(o, k, low, today) for k in keys)
 
 
-FILTERS = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"),
-           ("low", "کم‌موجودی"), ("oos", "ناموجود"), ("disc", "دارای تخفیف"),
+FILTERS = [("all", "همه"), ("mylist", "⭐ لیست من"), ("active", "فعال"), ("inactive", "غیرفعال"),
+           ("instock", "موجود"), ("low", "کم‌موجودی"), ("oos", "ناموجود"), ("disc", "دارای تخفیف"),
            ("bbwin", "بای‌باکس دارم"), ("bblose", "بای‌باکس ندارم")]
 
 

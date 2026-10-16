@@ -286,6 +286,11 @@ class RepriceFollowUp(unittest.TestCase):
         rows, skipped = L.plan_undercut([p], 5000, 0, 15, "2026-10-15", False, only=[p])
         self.assertEqual(rows, [])
 
+    def test_mylist_filter_registered(self):
+        self.assertIn(("mylist", "⭐ لیست من"), L.FILTERS)
+        # match() passes it through; the app filters by membership in vis()
+        self.assertTrue(L.match(L.norm_prod(P1), "mylist", 3, "2026-10-15"))
+
     def test_floor_uses_discounted_price_when_active(self):
         # P1 has an active 40%-ish discount on 2026-10-15: eff = 3,390,000
         p = L.norm_prod(P1)

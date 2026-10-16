@@ -380,6 +380,13 @@ class ProdCard(Bg):
         if o.is_bb: bs.append(badge("بای‌باکس دارم", "g"))
         elif o.buy_box is not None: bs.append(badge("بای‌باکس ندارم", "r"))
         brow_ = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(38), spacing=dp(8))
+        star_in = bool(o.key) and o.key in app.mylist
+        sb = RBtn("★" if star_in else "☆", (0.85, 0.62, 0.12, 1) if star_in else ACC2)
+        sb.height = dp(38)
+        sb.size_hint_x = None
+        sb.width = dp(54)
+        sb.bind(on_release=lambda *_: app.toggle_mylist(o))
+        brow_.add_widget(sb)
         eb = RBtn("ویرایش", ACC2)
         eb.height = dp(38)
         eb.bind(on_release=lambda *_: app.edit_product(o))
@@ -412,6 +419,7 @@ class SnappShopApp(App):
         self.P: List[Any] = []
         self.uc_params = (5000, 0, 15)
         self.PF, self.Q, self.shown = set(), "", 100
+        self.mylist = set()
         self.O: List[Any] = []
         self.OF = "all"
         self.log_lines = []
@@ -429,6 +437,7 @@ class SnappShopApp(App):
         self.bot = self._bot_mod()
         self.bot_obj = None
         self._bot_log_ready = False
+        self.mylist = set(self.bot.jload(os.path.join(self.out_dir(), "mylist.json"), []) or [])
 
         root = BoxLayout(orientation="vertical")
         header = Bg(color=BAR, orientation="vertical", size_hint_y=None, height=dp(58), padding=[0, dp(6), 0, 0])
@@ -767,7 +776,11 @@ class SnappShopApp(App):
     def vis(self):
         today = datetime.date.today().isoformat()
         q = self.Q
-        return [o for o in self.P if L.match_all(o, self.PF, self.low, today) and L.match_query(o, q)]
+        ml = self.mylist if "mylist" in self.PF else None
+        keys = [k for k in self.PF if k != "mylist"]
+        return [o for o in self.P
+                if (ml is None or o.key in ml)
+                and L.match_all(o, keys, self.low, today) and L.match_query(o, q)]
 
     def _on_q_raw(self, val):
         self.Q = val.strip()
@@ -802,7 +815,11 @@ class SnappShopApp(App):
         today = datetime.date.today().isoformat()
         for key, label in reversed(L.FILTERS):
             others = [k for k in self.PF if k != key]
-            cnt = sum(1 for o in self.P if L.match_all(o, others + ([key] if key != "all" else []), self.low, today))
+            if key == "mylist":
+                cnt = sum(1 for o in self.P if o.key in self.mylist
+                          and L.match_all(o, [k for k in others if k != "mylist"], self.low, today))
+            else:
+                cnt = sum(1 for o in self.P if L.match_all(o, others + ([key] if key != "all" else []), self.low, today))
             ch = Chip(f"{label}  {n(cnt)}", key, active=((not self.PF) if key == "all" else key in self.PF))
             ch.bind(on_release=lambda c: self.set_pf(c.key))
             self.pchips.add_widget(ch)
@@ -848,14 +865,32 @@ class SnappShopApp(App):
             o.sel = on
         self.render_products()
 
+    def toggle_mylist(self, o):
+        """Add/remove a product to the user's own custom list («لیست من»). Saved to disk."""
+        k = o.key
+        if not k:
+            return
+        if k in self.mylist:
+            self.mylist.discard(k)
+            self.log(f"از «لیست من» حذف شد: {o.name}")
+        else:
+            self.mylist.add(k)
+            self.log(f"به «لیست من» اضافه شد: {o.name}")
+        self.bot.jsave(os.path.join(self.out_dir(), "mylist.json"), sorted(self.mylist))
+        self.render_products()
+
     def get_products(self):
         if not self._need_vid():
             return
         def f():
             raw = self.client.products(self.vendor_id, lambda p, t: self.progress(f"دریافت محصولات: صفحه {p} از {t}"))
             def done():
+                old_sel = {o.key for o in self.P if o.sel and o.key}
                 self.P = [L.norm_prod(p, i) for i, p in enumerate(raw)]
-                self.PF, self.shown = set(), 100
+                for o in self.P:
+                    if o.key in old_sel:
+                        o.sel = True
+                self.shown = 100
                 self.render_products()
                 self.log(f"تعداد محصولات: {len(raw)}", "ok")
             self.ui(done)
@@ -984,15 +1019,12 @@ class SnappShopApp(App):
             if not changes:
                 self.log("تغییری لازم نبود." + (f" ({skipped} کالا بدون قیمت/موجودی معتبر)" if skipped else ""), "err")
                 return
-            self.go("log")
             self.log(f"در حال اعمال ویرایش گروهی روی {len(changes)} کالا...")
             items = [o.item(price=p, stock=s) for o, p, s in changes]
             def then(bad):
                 for o, p, s in changes:
                     if o.key not in bad:
                         o.price, o.stock = p, s
-                for o in sel:
-                    o.sel = False
                 self.render_products()
             self.patch(items, then, "ویرایش گروهی", [o for o, _p, _s in changes])
         self.modal("ویرایش گروهی", f"{n(len(sel))} کالا انتخاب شده است. فقط فیلدهای پرشده اعمال می‌شود.", body,
@@ -1033,25 +1065,43 @@ class SnappShopApp(App):
             if not plan:
                 self.log("کالایی برای تخفیف پیدا نشد.", "err")
                 return
-            self.go("log")
             self.log(f"در حال ثبت تخفیف {pct:g}٪ روی {len(plan)} کالا...")
             def then(bad):
                 for o, it in plan:
                     if o.key not in bad:
                         o.sp, o.sp_start, o.sp_end = it["special_price"], st.isoformat(), en.isoformat()
-                for o in sel:
-                    o.sel = False
                 self.render_products()
             self.patch([it for _o, it in plan], then, "تخفیف گروهی", [o for o, _it in plan])
         self.modal("تخفیف گروهی", f"{n(len(sel))} کالا انتخاب شده است. قیمت پس از تخفیف از روی قیمت پایه محاسبه می‌شود.", body,
                    [("انصراف", ACC2, None), ("ثبت تخفیف", ACC, apply)], h=0.8)
 
     def undercut_one(self, o):
-        """One product: preview with the last used settings, then confirm (can be undone afterwards)."""
+        """One product: apply the buy-box price immediately with the last used settings
+        (no preview, stays on the products tab; can be undone afterwards)."""
         if not self._need_vid():
             return
         d, f_, m_ = self.uc_params
-        self._undercut_preview([o], d, f_, m_)
+        today = datetime.date.today().isoformat()
+        rows, skipped = L.plan_undercut(self.P, d, f_, m_, today, True, only=[o])
+        if not rows:
+            self.log("کالایی برای قیمت‌گذاری پیدا نشد." + (f" ({skipped} کالا بدون قیمت بای‌باکس)" if skipped else ""), "err")
+            return
+        r = rows[0]
+        if r["why"]:
+            self.log(f"{o.name}: رد شد ({r['why']})", "err")
+            return
+        arrow = "↑" if r["up"] else "↓"
+        self.log(f"{o.name}: {arrow} {n(r['old'])} ← {n(r['np'])} تومان   (بای‌باکس: {n(o.buy_box)} تومان)", "ok")
+        def then(bad):
+            if r["o"].key in bad:
+                self.log("اعمال قیمت ناموفق بود.", "err")
+                return
+            if r["kind"] == "special":
+                r["o"].sp = r["np"]
+            else:
+                r["o"].price = r["np"]
+            self.render_products()
+        self.patch([r["item"]], then, "قیمت‌گذاری زیر بای‌باکس", [r["o"]])
 
     def undercut(self):
         if not self.P:
@@ -1124,7 +1174,6 @@ class SnappShopApp(App):
             chosen = [r for r, cb in zip(rows, checks) if cb.active and not r["why"]]
             if not chosen:
                 return
-            self.go("log")
             self.log(f"در حال اعمال قیمت‌ها روی {len(chosen)} کالا...")
             def then(bad):
                 for r in chosen:
@@ -1134,7 +1183,6 @@ class SnappShopApp(App):
                         r["o"].sp = r["np"]
                     else:
                         r["o"].price = r["np"]
-                    r["o"].sel = False
                 self.render_products()
                 self.log("برای دیدن وضعیت بای‌باکس، چند دقیقه بعد «بروزرسانی لیست» را بزنید.")
             self.patch([r["item"] for r in chosen], then, "قیمت‌گذاری زیر بای‌باکس", [r["o"] for r in chosen])
