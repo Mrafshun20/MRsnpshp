@@ -6,7 +6,7 @@ source.dir = .
 source.include_exts = py,ttf,png
 source.exclude_dirs = tests,.github,bin,.buildozer
 source.exclude_patterns = build_windows.py
-version = 3.3.0
+version = 3.4.0
 icon.filename = %(source.dir)s/icon.png
 requirements = python3==3.11.5,hostpython3==3.11.5,kivy==2.3.0,pyjnius,android,androidstorage4kivy,certifi,arabic-reshaper,python-bidi==0.4.2,future
 orientation = portrait

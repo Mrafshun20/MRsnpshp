@@ -2,7 +2,7 @@ name: Build Windows App
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, ui-modern ]
     paths: [ "main.py", "logic.py", "core.py", "bot.py", "build_windows.py", ".github/workflows/windows-build.yml" ]
   workflow_dispatch:
 
