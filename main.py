@@ -353,9 +353,9 @@ class ProdCard(Bg):
                            radius=2, size_hint_y=None, height=dp(3)))
         tap = Tap(orientation="vertical", size_hint_y=None)
         tap.bind(minimum_height=tap.setter("height"))
-        tap.add_widget(lab(o.name, bold=True, size=14))
-        tap.add_widget(lab(o.key, MUT, 11))
-        tap.bind(on_release=lambda *_: app.edit_product(o))
+        tap.add_widget(lab(o.name, ACC if o.url() else TXT, 14, bold=True))
+        tap.add_widget(lab(o.key + ("   ·   با لمس نام، صفحه‌ی کالا در اسنپ‌شاپ باز می‌شود" if o.url() else ""), MUT, 11))
+        tap.bind(on_release=lambda *_: app.open_url(o.url()) if o.url() else app.edit_product(o))
         top.add_widget(tap)
         top.add_widget(cb)
         self.add_widget(top)
@@ -372,6 +372,17 @@ class ProdCard(Bg):
         if o.has_discount(today): bs.append(badge("تخفیف فعال", "g"))
         if o.is_bb: bs.append(badge("بای‌باکس دارم", "g"))
         elif o.buy_box is not None: bs.append(badge("بای‌باکس ندارم", "r"))
+        brow_ = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(38), spacing=dp(8))
+        eb = RBtn("ویرایش", ACC2)
+        eb.height = dp(38)
+        eb.bind(on_release=lambda *_: app.edit_product(o))
+        brow_.add_widget(eb)
+        if o.buybox_state(today) == "lose":
+            wb = RBtn("برنده شدن در بای‌باکس", (0.55, 0.38, 0.85, 1))
+            wb.height = dp(38)
+            wb.bind(on_release=lambda *_: app.undercut_one(o))
+            brow_.add_widget(wb)
+        self.add_widget(brow_)
         if bs:
             row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(24), spacing=dp(6))
             row.add_widget(BoxLayout())
@@ -392,7 +403,8 @@ class SnappShopApp(App):
         self.client = None
         self.vendor_id = ""
         self.P: List[Any] = []
-        self.PF, self.Q, self.shown = "all", "", 100
+        self.uc_params = (5000, 0, 15)
+        self.PF, self.Q, self.shown = set(), "", 100
         self.O: List[Any] = []
         self.OF = "all"
         self.log_lines = []
@@ -457,7 +469,7 @@ class SnappShopApp(App):
         p4.bind(on_release=lambda *_: self.bulk_edit())
         p5 = RBtn("تخفیف گروهی با تاریخ شروع و پایان", (0.20, 0.55, 0.45, 1))
         p5.bind(on_release=lambda *_: self.discount_campaign())
-        p6 = RBtn("قیمت‌گذاری هوشمند زیر بای‌باکس", (0.55, 0.38, 0.85, 1))
+        p6 = RBtn("تعدیل گروهی برای برنده شدن در بای‌باکس", (0.55, 0.38, 0.85, 1))
         p6.bind(on_release=lambda *_: self.undercut())
         p7 = RBtn("خروجی Excel همه محصولات", ACC2)
         p7.bind(on_release=lambda *_: self.export_products_xlsx())
@@ -614,6 +626,22 @@ class SnappShopApp(App):
                 self.log(friendly(e), "err")
         threading.Thread(target=w, daemon=True).start()
 
+    def open_url(self, url):
+        if not url:
+            self.log("شماره‌ی محصول اسنپ‌شاپ برای این کالا پیدا نشد.", "err")
+            return
+        try:
+            if platform == "android":
+                from jnius import autoclass
+                Intent, Uri = autoclass("android.content.Intent"), autoclass("android.net.Uri")
+                autoclass("org.kivy.android.PythonActivity").mActivity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            else:
+                import webbrowser
+                webbrowser.open(url)
+        except Exception as e:
+            self.log(f"باز کردن لینک ممکن نشد: {e}\n{url}", "err")
+            self.copy_text(url)
+
     def copy_text(self, text):
         try:
             Clipboard.copy(str(text))
@@ -732,7 +760,7 @@ class SnappShopApp(App):
     def vis(self):
         today = datetime.date.today().isoformat()
         q = self.Q
-        return [o for o in self.P if L.match(o, self.PF, self.low, today) and L.match_query(o, q)]
+        return [o for o in self.P if L.match_all(o, self.PF, self.low, today) and L.match_query(o, q)]
 
     def _on_q_raw(self, val):
         self.Q = val.strip()
@@ -751,15 +779,24 @@ class SnappShopApp(App):
             Clock.schedule_once(self._q_apply, 0.5)
 
     def set_pf(self, key):
-        self.PF, self.shown = key, 100
+        # several filters can be active together (e.g. بای‌باکس ندارم + فعال); «همه» clears them
+        if key == "all":
+            self.PF = set()
+        elif key in self.PF:
+            self.PF.discard(key)
+        else:
+            self.PF.add(key)
+            self.PF.discard(L.FILTER_EXCLUSIVE.get(key, ""))
+        self.shown = 100
         self.render_products()
 
     def render_pchips(self):
         self.pchips.clear_widgets()
         today = datetime.date.today().isoformat()
         for key, label in reversed(L.FILTERS):
-            cnt = sum(1 for o in self.P if L.match(o, key, self.low, today))
-            ch = Chip(f"{label}  {n(cnt)}", key, active=(self.PF == key))
+            others = [k for k in self.PF if k != key]
+            cnt = sum(1 for o in self.P if L.match_all(o, others + ([key] if key != "all" else []), self.low, today))
+            ch = Chip(f"{label}  {n(cnt)}", key, active=((not self.PF) if key == "all" else key in self.PF))
             ch.bind(on_release=lambda c: self.set_pf(c.key))
             self.pchips.add_widget(ch)
 
@@ -811,7 +848,7 @@ class SnappShopApp(App):
             raw = self.client.products(self.vendor_id, lambda p, t: self.progress(f"دریافت محصولات: صفحه {p} از {t}"))
             def done():
                 self.P = [L.norm_prod(p, i) for i, p in enumerate(raw)]
-                self.PF, self.shown = "all", 100
+                self.PF, self.shown = set(), 100
                 self.render_products()
                 self.log(f"تعداد محصولات: {len(raw)}", "ok")
             self.ui(done)
@@ -1002,6 +1039,13 @@ class SnappShopApp(App):
         self.modal("تخفیف گروهی", f"{n(len(sel))} کالا انتخاب شده است. قیمت پس از تخفیف از روی قیمت پایه محاسبه می‌شود.", body,
                    [("انصراف", ACC2, None), ("ثبت تخفیف", ACC, apply)], h=0.8)
 
+    def undercut_one(self, o):
+        """One product: preview with the last used settings, then confirm (can be undone afterwards)."""
+        if not self._need_vid():
+            return
+        d, f_, m_ = self.uc_params
+        self._undercut_preview([o], d, f_, m_)
+
     def undercut(self):
         if not self.P:
             self.log("ابتدا «بروزرسانی لیست» را بزنید.", "err")
@@ -1017,58 +1061,64 @@ class SnappShopApp(App):
         body = vbox()
         for w in (lab("چند تومان زیر قیمت بای‌باکس", MUT, 12), e_d, lab("حداقل قیمت مجاز (اختیاری)", MUT, 12), e_f,
                   lab("حداکثر افت قیمت نسبت به قیمت فعلی (درصد)", MUT, 12), e_m,
-                  lab("روی کالاهای انتخاب‌شده اعمال می‌شود؛ اگر چیزی انتخاب نشده باشد، روی همه‌ی «بای‌باکس ندارم». برای کالاهای دارای تخفیف، قیمت تخفیف تغییر می‌کند. قبل از ارسال، لیست را می‌بینید و می‌توانید بعداً بازگردانی کنید.", MUT, 11)):
+                  lab("روی کالاهای تیک‌خورده اعمال می‌شود؛ اگر چیزی تیک نخورده باشد، روی همه‌ی کالاهای لیست فعلی (با فیلترهایی که زده‌اید، مثلاً «بای‌باکس ندارم + فعال») که بای‌باکس را باخته‌اند. برای کالاهای دارای تخفیف، قیمت تخفیف تغییر می‌کند. قبل از ارسال، لیست را می‌بینید و بعداً می‌توانید بازگردانی کنید.", MUT, 11)):
             body.add_widget(w)
-        today = datetime.date.today().isoformat()
         def go_preview():
             delta, floor, mx = int(self._fnum(e_d.text) or 0), int(self._fnum(e_f.text) or 0), float(self._fnum(e_m.text) or 15)
-            rows, skipped = L.plan_undercut(self.P, delta, floor, mx, today, True)
-            if not rows:
-                self.log("کالایی برای قیمت‌گذاری پیدا نشد." + (f" ({skipped} کالا بدون قیمت بای‌باکس)" if skipped else ""), "err")
-                return
-            rows = rows[:300]
-            pb = vbox()
-            checks = []
-            for r in rows:
-                row = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(8))
-                row.bind(minimum_height=row.setter("height"))
-                cb = CheckBox(size_hint=(None, None), size=(dp(30), dp(30)), active=not r["why"], disabled=bool(r["why"]))
-                checks.append(cb)
-                t = lab(r["o"].name + (("\n" + r["why"]) if r["why"] else ""), MUT if r["why"] else TXT, 13)
-                v = lab(f"{n(r['o'].eff(today))} ← {n(r['np'])}", TXT, 12, halign="left")
-                v.size_hint_x = None
-                v.width = dp(150)
-                row.add_widget(v)
-                row.add_widget(t)
-                row.add_widget(cb)
-                pb.add_widget(row)
-            ok = sum(1 for r in rows if not r["why"])
-            def apply():
-                chosen = [r for r, cb in zip(rows, checks) if cb.active and not r["why"]]
-                if not chosen:
-                    return
-                self.go("log")
-                self.log(f"در حال اعمال قیمت‌ها روی {len(chosen)} کالا...")
-                def then(bad):
-                    for r in chosen:
-                        if r["o"].key in bad:
-                            continue
-                        if r["kind"] == "special":
-                            r["o"].sp = r["np"]
-                        else:
-                            r["o"].price = r["np"]
-                        r["o"].sel = False
-                    self.render_products()
-                    self.log("برای دیدن وضعیت بای‌باکس، چند دقیقه بعد «بروزرسانی لیست» را بزنید.")
-                self.patch([r["item"] for r in chosen], then, "قیمت‌گذاری زیر بای‌باکس", [r["o"] for r in chosen])
-            mv, btns = self.modal("پیش‌نمایش قیمت‌گذاری", f"هر قیمت {n(delta)} تومان زیر بای‌باکس" + (f" · {n(skipped)} کالا بدون قیمت بای‌باکس نادیده گرفته شد" if skipped else ""),
-                                  pb, [("انصراف", ACC2, None), (f"اعمال روی {n(ok)} کالا", ACC, apply)])
-            def upd(*_):
-                k = sum(1 for r, cb in zip(rows, checks) if cb.active and not r["why"])
-                btns[1].set_text(f"اعمال روی {n(k)} کالا")
-            for cb in checks:
-                cb.bind(active=upd)
+            self.uc_params = (delta, floor, mx)
+            sel = [o for o in self.P if o.sel]
+            self._undercut_preview(sel if sel else self.vis(), delta, floor, mx)
         self.modal("قیمت‌گذاری زیر بای‌باکس", "", body, [("انصراف", ACC2, None), ("پیش‌نمایش", ACC, go_preview)], h=0.8)
+
+
+    def _undercut_preview(self, base, delta, floor, mx):
+        today = datetime.date.today().isoformat()
+        rows, skipped = L.plan_undercut(self.P, delta, floor, mx, today, True, only=base)
+        if not rows:
+            self.log("کالایی برای قیمت‌گذاری پیدا نشد." + (f" ({skipped} کالا بدون قیمت بای‌باکس)" if skipped else ""), "err")
+            return
+        rows = rows[:300]
+        pb = vbox()
+        checks = []
+        for r in rows:
+            row = BoxLayout(orientation="horizontal", size_hint_y=None, spacing=dp(8))
+            row.bind(minimum_height=row.setter("height"))
+            cb = CheckBox(size_hint=(None, None), size=(dp(30), dp(30)), active=not r["why"], disabled=bool(r["why"]))
+            checks.append(cb)
+            t = lab(r["o"].name + (("\n" + r["why"]) if r["why"] else ""), MUT if r["why"] else TXT, 13)
+            v = lab(f"{n(r['o'].eff(today))} ← {n(r['np'])}", TXT, 12, halign="left")
+            v.size_hint_x = None
+            v.width = dp(150)
+            row.add_widget(v)
+            row.add_widget(t)
+            row.add_widget(cb)
+            pb.add_widget(row)
+        ok = sum(1 for r in rows if not r["why"])
+        def apply():
+            chosen = [r for r, cb in zip(rows, checks) if cb.active and not r["why"]]
+            if not chosen:
+                return
+            self.go("log")
+            self.log(f"در حال اعمال قیمت‌ها روی {len(chosen)} کالا...")
+            def then(bad):
+                for r in chosen:
+                    if r["o"].key in bad:
+                        continue
+                    if r["kind"] == "special":
+                        r["o"].sp = r["np"]
+                    else:
+                        r["o"].price = r["np"]
+                    r["o"].sel = False
+                self.render_products()
+                self.log("برای دیدن وضعیت بای‌باکس، چند دقیقه بعد «بروزرسانی لیست» را بزنید.")
+            self.patch([r["item"] for r in chosen], then, "قیمت‌گذاری زیر بای‌باکس", [r["o"] for r in chosen])
+        mv, btns = self.modal("پیش‌نمایش قیمت‌گذاری", f"هر قیمت {n(delta)} تومان زیر بای‌باکس" + (f" · {n(skipped)} کالا بدون قیمت بای‌باکس نادیده گرفته شد" if skipped else ""),
+                              pb, [("انصراف", ACC2, None), (f"اعمال روی {n(ok)} کالا", ACC, apply)])
+        def upd(*_):
+            k = sum(1 for r, cb in zip(rows, checks) if cb.active and not r["why"])
+            btns[1].set_text(f"اعمال روی {n(k)} کالا")
+        for cb in checks:
+            cb.bind(active=upd)
 
     def export_products_xlsx(self):
         if not self.P:

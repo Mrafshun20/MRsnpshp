@@ -155,6 +155,7 @@ class Prod:
         self.sku = str(g("sku")) if g("sku") not in (None, "") else ""
         self.name = str(g("title") or g("title_en") or "(بدون نام)")
         self.pnum = str(g("product_number") or "")
+        self.parent = str(g("parent_product_number") or "")
         self.vpi = str(g("vendor_product_info_id") or "")
         self.name_en = str(g("title_en") or "")
         va = g("variation_attributes") if isinstance(g("variation_attributes"), list) else []
@@ -215,6 +216,10 @@ class Prod:
             return "win"
         return "lose" if self.buy_box is not None else None
 
+    def url(self) -> str:
+        """Product page on the SnappShop website (parent_product_number = the number shown on the site)."""
+        return PRODUCT_URL.format(n=self.parent) if self.parent else ""
+
     def lose_bb(self, today: str) -> bool:
         return self.buybox_state(today) == "lose"
 
@@ -232,6 +237,18 @@ class Prod:
 
 def norm_prod(raw: dict, i: int = 0) -> Prod:
     return Prod(raw, i)
+
+
+PRODUCT_URL = "https://snappshop.ir/product/{n}"   # change here if SnappShop changes its page address
+
+# filters that cannot be combined (choosing one replaces its opposite)
+FILTER_EXCLUSIVE = {"active": "inactive", "inactive": "active", "instock": "oos", "oos": "instock",
+                    "bbwin": "bblose", "bblose": "bbwin"}
+
+
+def match_all(o, keys, low, today) -> bool:
+    """All chosen filters must match (e.g. بای‌باکس ندارم + فعال)."""
+    return all(match(o, k, low, today) for k in keys)
 
 
 FILTERS = [("all", "همه"), ("active", "فعال"), ("inactive", "غیرفعال"), ("instock", "موجود"),
@@ -558,10 +575,13 @@ def products_export_rows(prods: List[Prod]):
 
 
 # ---------------- manual buy-box undercut (preview first) ----------------
-def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, today: str, selected_only: bool):
+def plan_undercut(prods: List[Prod], delta: int, floor: int, maxdrop: float, today: str, selected_only: bool, only=None):
     """Price just below the buy-box price. Returns (rows, skipped); row = {o, np, why, item, kind}."""
     sel = [o for o in prods if o.sel]
-    base = sel if (selected_only and sel) else [o for o in prods if o.buybox_state(today) == "lose"]
+    if only is not None:                       # explicit list (one product, or the filtered list on screen)
+        base = [o for o in only if o.buybox_state(today) == "lose"]
+    else:
+        base = sel if (selected_only and sel) else [o for o in prods if o.buybox_state(today) == "lose"]
     rows, skipped = [], 0
     for o in base:
         e = o.eff_price(today)
