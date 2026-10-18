@@ -59,7 +59,7 @@ import licensing as LIC
 # ---------------- sales (edit before selling license keys) ----------------
 SALES_INFO = (
     "برای دریافت کلید لایسنس با ما در تماس باشید:\n"
-    "تلگرام: @YOUR_TELEGRAM_ID\n"
+    "تلگرام: @ittouch_app\n"
     "پس از پرداخت، کلید را در کادر بالا وارد و «فعال‌سازی» را بزنید."
 )
 
