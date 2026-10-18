@@ -51,7 +51,7 @@ jobs:
         run: |
           if [ "${{ github.ref_name }}" = "ui-modern" ]; then SUF="-light"; else SUF=""; fi
           echo "suffix=$SUF" >> "$GITHUB_OUTPUT"
-          cp "dist/SnappShop.exe" "dist/SnappShop$SUF.exe"
+          if [ -n "$SUF" ]; then cp "dist/SnappShop.exe" "dist/SnappShop$SUF.exe"; fi
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
