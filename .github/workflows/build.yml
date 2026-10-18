@@ -21,9 +21,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Write license secret (build-time only, never committed)
+        run: |
+          if [ -z "${{ secrets.LICENSE_SECRET }}" ]; then
+            echo "::error::LICENSE_SECRET is not set. Add it in repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          printf 'SECRET = "%s"\n' "${{ secrets.LICENSE_SECRET }}" > license_secret.py
       - name: Compile check and unit tests
         run: |
-          python -m py_compile main.py logic.py core.py bot.py
+          python -m py_compile main.py logic.py core.py bot.py licensing.py
           python -m unittest discover -s tests
       - name: Install deps
         run: |
