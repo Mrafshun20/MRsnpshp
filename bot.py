@@ -21,6 +21,7 @@ from logging.handlers import RotatingFileHandler
 
 import core
 import logic as L
+import licensing as LICM
 
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.environ.get("SNAPP_BOT_DIR") or (os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__)))
@@ -423,6 +424,11 @@ def main(argv=None):
     if a.install_startup or a.uninstall_startup:
         startup(a.install_startup)
         return 0
+    _lic = LICM.load_license()
+    _ok, _plan, _exp, _err = LICM.validate_key(_lic["key"], LICM.SECRET) if _lic else (False, "", "", "لایسنس یافت نشد.")
+    if not _ok:
+        log.error("License %s Activate the app first.", _err)
+        return 3
     cfg = dict(DEFAULT)
     cfg.update(jload(CFG, {}))
     try:

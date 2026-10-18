@@ -54,6 +54,14 @@ except ImportError:
 
 import core
 import logic as L
+import licensing as LIC
+
+# ---------------- sales (edit before selling license keys) ----------------
+SALES_INFO = (
+    "برای دریافت کلید لایسنس با ما در تماس باشید:\n"
+    "تلگرام: @YOUR_TELEGRAM_ID\n"
+    "پس از پرداخت، کلید را در کادر بالا وارد و «فعال‌سازی» را بزنید."
+)
 
 # ---------------- theme (light seller panel) ----------------
 BG = (0.953, 0.941, 0.945, 1)
@@ -622,7 +630,11 @@ class SnappShopApp(App):
         b.bind(on_release=lambda *_: self.test_connection())
         b2 = RBtn("دریافت نمونه داده‌ها", ACC2)
         b2.bind(on_release=lambda *_: self.dump_samples())
+        self.lic_card_lbl = lab("", MUT, 12)
+        lic_btn = RBtn("تمدید / تغییر کلید", ACC2)
+        lic_btn.bind(on_release=lambda *_: self.go("lic"))
         self._add("conn", page(
+            card("لایسنس", self.lic_card_lbl, lic_btn),
             card("احراز هویت",
                  lab("کد یکتا در هدر User-Agent فرستاده می‌شود.", MUT, 12), shell(self.ent_ua),
                  lab("توکن Bearer", MUT, 12), shell(self.ent_token),
@@ -792,6 +804,7 @@ class SnappShopApp(App):
         lp.add_widget(lab("برای کپی بخشی از متن، آن را نگه دارید و انتخاب کنید؛ «کپی همه» کل گزارش را کپی می‌کند.", MUT, 11, halign="center"))
         lp.add_widget(self.log_sv)
         self._add("log", lp)
+        self._add("lic", self._build_lic())
 
         root.add_widget(self.sm)
         nav = Bg(color=BAR, border=LINE2, size_hint_y=None, height=dp(58))
@@ -802,11 +815,15 @@ class SnappShopApp(App):
         for nb in reversed(self.navs):          # RTL: first tab (اتصال) on the right, گزارش on the far left
             nav.add_widget(nb)
         root.add_widget(nav)
-        self.navs[0].state = "down"
+        self.refresh_license()
+        if self.lic_ok():
+            self.navs[0].state = "down"
+        else:
+            self.sm.current = "lic"
         self.render_products()
         self.render_orders()
         self.log("آماده است.")
-        if self.cfg.get("bot_on") and self.cfg.get("ua") and self.cfg.get("token") and self.cfg.get("vid"):
+        if self.lic_ok() and self.cfg.get("bot_on") and self.cfg.get("ua") and self.cfg.get("token") and self.cfg.get("vid"):
             Clock.schedule_once(lambda dt: self.start_bot(), 2)
         if os.name == "nt" and "--minimized" in sys.argv:
             Clock.schedule_once(lambda dt: self._minimize(), 3)
@@ -818,9 +835,75 @@ class SnappShopApp(App):
         self.sm.add_widget(s)
 
     def go(self, name):
+        if name != "lic" and not self.lic_ok():
+            name = "lic"
+        if name == "lic":
+            for nb in self.navs:
+                nb.state = "normal"
+            self.sm.current = "lic"
+            return
         for nb in self.navs:
             if nb.name == name:
                 nb.state = "down"
+
+    # ---- license
+    def _load_license(self):
+        lic = LIC.load_license([self.out_dir()] + LIC.license_dirs())
+        if not lic:
+            return None
+        ok, plan, exp, err = LIC.validate_key(lic.get("key", ""), LIC.SECRET)
+        if not ok:
+            return {"ok": False, "err": err}
+        return {"ok": True, "plan": plan, "expiry": exp}
+
+    def lic_ok(self):
+        return bool(getattr(self, "lic", None) and self.lic.get("ok"))
+
+    def refresh_license(self):
+        self.lic = self._load_license()
+        self._render_lic_card()
+
+    def lic_status_text(self):
+        if not self.lic:
+            return "لایسنسی ثبت نشده است."
+        if not self.lic.get("ok"):
+            return self.lic.get("err", "لایسنس معتبر نیست.")
+        left = LIC.days_left(self.lic["expiry"])
+        t = "پلن %s · تا %s · %s روز مانده" % (LIC.plan_label(self.lic["plan"]), self.lic["expiry"], n(left))
+        if left <= 7:
+            t += " — به‌زودی تمدید کنید"
+        return t
+
+    def _render_lic_card(self):
+        if hasattr(self, "lic_card_lbl"):
+            self.lic_card_lbl.text = fa(self.lic_status_text())
+            self.lic_card_lbl.color = GRN if self.lic_ok() else (AMB if self.lic else RED)
+        if hasattr(self, "lic_screen_lbl"):
+            self.lic_screen_lbl.text = fa(self.lic_status_text())
+
+    def _build_lic(self):
+        self.lic_screen_lbl = lab("", MUT, 13, halign="center")
+        self.ent_lickey = inp("SSV-XXXX-XXXX-...")
+        act = RBtn("فعال‌سازی لایسنس")
+        act.bind(on_release=lambda *_: self._activate_license())
+        return page(
+            card("فعال‌سازی لایسنس",
+                 self.lic_screen_lbl,
+                 lab("کلید لایسنس", MUT, 12), self.ent_lickey, act),
+            card("دریافت لایسنس", lab(SALES_INFO, MUT, 12)))
+
+    def _activate_license(self):
+        key = self.ent_lickey.text.strip()
+        ok, plan, exp, err = LIC.validate_key(key, LIC.SECRET)
+        if not ok:
+            self.log("فعال‌سازی ناموفق: " + err, "err")
+            self.lic_screen_lbl.text = fa(err)
+            self.lic_screen_lbl.color = RED
+            return
+        LIC.save_license(self.out_dir(), key)
+        self.refresh_license()
+        self.log("لایسنس %s تا %s فعال شد." % (LIC.plan_label(plan), exp), "ok")
+        self.go("conn")
 
     def scroll_top(self, name):
         """Scroll a tab's list back to the top (used after refreshes and tab taps)."""

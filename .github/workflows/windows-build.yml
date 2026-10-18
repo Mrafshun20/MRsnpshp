@@ -3,7 +3,7 @@ name: Build Windows App
 on:
   push:
     branches: [ main, master, ui-modern ]
-    paths: [ "main.py", "logic.py", "core.py", "bot.py", "build_windows.py", ".github/workflows/windows-build.yml" ]
+    paths: [ "main.py", "logic.py", "core.py", "bot.py", "licensing.py", "build_windows.py", ".github/workflows/windows-build.yml" ]
   workflow_dispatch:
 
 permissions:
@@ -26,9 +26,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install kivy==2.3.0 kivy_deps.sdl2 kivy_deps.glew kivy_deps.angle certifi arabic-reshaper python-bidi==0.4.2 future pyinstaller
 
+      - name: Write license secret (build-time only, never committed)
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.LICENSE_SECRET }}" ]; then
+            echo "::error::LICENSE_SECRET is not set. Add it in repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          printf 'SECRET = "%s"\n' "${{ secrets.LICENSE_SECRET }}" > license_secret.py
       - name: Compile check and unit tests
         run: |
-          python -m py_compile main.py logic.py core.py bot.py build_windows.py
+          python -m py_compile main.py logic.py core.py bot.py licensing.py build_windows.py
           python -m unittest discover -s tests
 
       - name: Build EXE with PyInstaller

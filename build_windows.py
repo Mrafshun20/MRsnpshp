@@ -14,6 +14,7 @@ PyInstaller.__main__.run([
     "--noconfirm", "--onefile", "--windowed", "--name=SnappShop",
     "--add-data=DejaVuSans.ttf;.", "--add-data=DejaVuSans-Bold.ttf;.", f"--add-data={share};share", *bins,
     "--hidden-import=logic", "--hidden-import=core", "--hidden-import=bot",
+    "--hidden-import=licensing", "--hidden-import=license_secret",
     "--hidden-import=kivy_deps.sdl2", "--hidden-import=kivy_deps.glew", "--hidden-import=kivy_deps.angle",
     "main.py",
 ])
