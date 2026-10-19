@@ -167,6 +167,13 @@ class Prod:
         self.wstock = to_num(g("warehouse_stock"))
         self.active = g("active") if isinstance(g("active"), bool) else None
         self.capacity = g("capacity")
+        w = g("warranty")
+        if isinstance(w, dict):
+            self.warranty = str(w.get("title") or w.get("name") or "")
+        elif w not in (None, ""):
+            self.warranty = str(w)
+        else:
+            self.warranty = ""
         d = g("discount") if isinstance(g("discount"), dict) else {}
         self.sp = to_num(d.get("special_price"))
         self.sp_start = str(d.get("start_at") or "")
