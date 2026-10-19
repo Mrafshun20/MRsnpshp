@@ -1319,8 +1319,16 @@ class SnappShopApp(App):
         e_en = inp("YYYY-MM-DD", o.sp_end[:10] if o.sp_end else (today + datetime.timedelta(days=30)).isoformat())
         body = vbox()
         widgets = [lab("قیمت پایه (تومان)", MUT, 12), ep, lab("موجودی", MUT, 12), es]
+        e_comp = None
         if o.buy_box is not None:
             widgets.append(lab(f"قیمت نفر دوم (بای‌باکس): {n(o.buy_box)} تومان", AMB, 12, bold=True))
+        else:
+            delta0 = self.uc_params[0]
+            e_comp = inp("قیمت رقیب", "", input_filter="int")
+            widgets.append(lab("بای‌باکس از API نیامده", AMB, 12, bold=True))
+            widgets.append(lab("قیمت رقیب (تومان) — دستی", MUT, 12))
+            widgets.append(e_comp)
+            widgets.append(lab(f"اگر پر شود، قیمت پایه خودکار روی «قیمت رقیب − {n(delta0)}» تنظیم می‌شود", MUT, 11))
         widgets += [lab("قیمت با تخفیف (تومان) — خالی = بدون تغییر", MUT, 12), ed,
                     lab("شروع تخفیف (میلادی)", MUT, 12), e_st,
                     lab("پایان تخفیف (میلادی)", MUT, 12), e_en]
@@ -1332,6 +1340,10 @@ class SnappShopApp(App):
             try:
                 pr = int(ep.text) if ep.text.strip() else o.price
                 st = int(es.text) if es.text.strip() else o.stock
+                if e_comp is not None and e_comp.text.strip():
+                    comp = int(e_comp.text.strip())
+                    pr = comp - self.uc_params[0]
+                    self.log(f"قیمت رقیب {n(comp)} → قیمت جدید {n(pr)} تومان", "info")
                 kw, dsp_info = {}, None
                 if ed.text.strip():
                     dsp = int(ed.text.strip())
